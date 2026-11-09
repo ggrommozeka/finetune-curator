@@ -105,6 +105,44 @@ def test_pagination_rate_limit_and_cache(tmp_path: Path):
     assert TOKEN not in str(caught.value)
 
 
+def test_line_movement_and_non_fix_commits():
+    from scripts.gitlab.trace import map_line, map_range, trace_thread
+
+    shifted, touched, _hunk = map_line(12, parse_hunks("@@ -1,0 +1,2 @@\n+added\n+lines\n"))
+    assert shifted == 14
+    assert touched is False
+    new_start, new_end, touched_range, _hunk = map_range(12, 12, parse_hunks("@@ -10,5 +10,5 @@\n a\n-b\n+c\n d\n e\n"))
+    assert touched_range is True
+    assert new_start == 12
+
+    note = {
+        "id": 1,
+        "body": "rename",
+        "created_at": "2024-03-01T10:00:00Z",
+        "position": {"new_path": "app.py", "new_line": 12, "head_sha": "base"},
+    }
+    shift = {
+        "id": "shift",
+        "message": "insert header",
+        "created_at": "2024-03-01T11:00:00Z",
+    }
+    edit = {
+        "id": "edit",
+        "message": "actual change, not marked MRR",
+        "created_at": "2024-03-01T12:00:00Z",
+    }
+    diffs = {
+        "shift": [{"old_path": "app.py", "new_path": "app.py", "diff": "@@ -1,0 +1,2 @@\n+added\n+lines\n"}],
+        "edit": [{"old_path": "app.py", "new_path": "app.py", "diff": "@@ -14,1 +14,1 @@\n-old_name\n+parse_config\n"}],
+    }
+    traced = trace_thread({"root": note, "replies": [], "discussion_id": "d"}, [shift, edit], diffs, {})
+    assert traced["status"] == "linked"
+    assert traced["confidence"] == 0.7
+    assert traced["commit_sha"] == "edit"
+    assert "parse_config" in traced["after"]
+    assert [item["sha"] for item in traced["changed_by"]] == ["edit"]
+
+
 def test_link_file_line_then_file_then_mr():
     assert is_fix_message("MRR fixes: rename", r"mrr\s*fixes")
     assert is_fix_message("mrr\nfixes typo", r"mrr\s*fixes")
@@ -307,6 +345,30 @@ def test_sync_is_incremental_and_process_is_offline(tmp_path: Path):
     blob = json.dumps(store.export_records(status="all"))
     assert "lead@company.com" not in blob
     assert "https://" not in blob
+    role = store._conn.execute("SELECT author_role, head_sha FROM notes WHERE note_id = '11'").fetchone()
+    assert role["author_role"] == "reviewer"
+    assert role["head_sha"].startswith("aaa")
+    traces = store.traces_for(1, 7)
+    anchored = next(item for item in traces if item["note_id"] == "11")
+    assert anchored["status"] == "linked"
+    assert anchored["anchor"]["new_line_start"] == 12
+    assert "old_name" in (anchored["anchor"]["snippet"] or anchored["before"])
+    assert any(reply["body"] == "ack, renaming" for reply in anchored["replies"])
+    assert anchored["resolved_by"]
+    store.set_link_override(1, "11", "not_addressed")
+    process_store(store, ["1!7"], reviewer="teamlead", anonymize=True, anonymize_urls=True)
+    assert store.traces_for(1, 7)
+    overridden = next(item for item in store.traces_for(1, 7) if item["note_id"] == "11")
+    assert overridden["manual"] is True
+    assert overridden["status"] == "not_addressed"
+    assert all(item["record"]["gitlab"]["note_id"] != 11 and str(item["record"]["gitlab"]["note_id"]) != "11" for item in store.examples_for(1, 7))
+    others = store.traces_for()
+    stats = store.link_stats()
+    assert stats["total"]["comments"] == len(others)
+    assert "with_fix_share" in stats["total"]
+    assert stats["by_reviewer"]
+    assert stats["by_file"]
+
     listed = store.list_mrs(reviewer="teamlead", fixes_only=True, min_comments=1)
     assert [row["ref"] for row in listed] == ["1!7"]
     assert store.list_mrs(fixes_only=True, since="2025-01-01") == []

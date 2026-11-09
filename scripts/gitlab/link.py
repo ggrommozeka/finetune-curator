@@ -183,74 +183,39 @@ def link_comment(
     *,
     line_pad: int = 2,
 ) -> dict | None:
-    """Link one note to the earliest later fix that best explains it.
+    """Link one note. ``MRR fixes`` commits are preferred; other later commits still count.
 
-    Preference: file + line overlap, then same file, then any later MRR-fix commit.
-    Returns None when no fix commit is strictly after the comment.
+    Line numbers are replayed through each later diff, so a fix is found after
+    earlier commits shift the anchored line. Returns None when nothing after
+    the comment can be tied to a hunk.
     """
-    path, line0, line1 = comment_target(note)
-    try:
-        note_time = parse_time(str(note.get("created_at") or ""))
-    except ValueError:
-        return None
-    later = []
-    for commit in fix_commits:
-        try:
-            commit_time = parse_time(str(commit.get("created_at") or commit.get("committed_date") or ""))
-        except ValueError:
-            continue
-        if commit_time > note_time:
-            later.append(commit)
-    later.sort(key=lambda commit: parse_time(str(commit.get("created_at") or commit.get("committed_date"))))
-    if not later:
-        return None
+    from scripts.gitlab.trace import trace_thread
 
-    line_hit = None
-    file_hit = None
-    for commit in later:
-        sha = str(commit.get("id") or commit.get("sha") or "")
-        on_path, everything = _hunks_for(diffs_by_sha.get(sha) or [], path)
-        if path and line0 is not None:
-            matched = [hunk for hunk in on_path if _overlaps(hunk, line0, line1 or line0, line_pad)]
-            if matched and line_hit is None:
-                line_hit = (commit, matched, sha)
-        if path and on_path and file_hit is None:
-            file_hit = (commit, on_path, sha)
-        if line_hit:
-            break
-
-    if line_hit:
-        commit, hunks, sha = line_hit
-        link = "file_line"
-        confidence = FILE_LINE_CONFIDENCE
-    elif file_hit:
-        commit, hunks, sha = file_hit
-        link = "file"
-        confidence = FILE_CONFIDENCE
-    else:
-        commit = later[0]
-        sha = str(commit.get("id") or commit.get("sha") or "")
-        _on_path, hunks = _hunks_for(diffs_by_sha.get(sha) or [], None)
-        link = "mr"
-        confidence = MR_CONFIDENCE
-
-    before = "\n\n".join(hunk.before for hunk in hunks if hunk.before).strip()
-    after = "\n\n".join(hunk.after for hunk in hunks if hunk.after).strip()
-    diff_text = "\n".join(hunk.text for hunk in hunks if hunk.text).strip()
-    if not before and not after and not diff_text:
+    traced = trace_thread(
+        {"root": note, "replies": [], "discussion_id": ""},
+        fix_commits,
+        diffs_by_sha,
+        {},
+        line_pad=line_pad,
+    )
+    if traced["status"] in {"not_addressed", "unclear"} and not traced.get("diff"):
         return None
+    if not traced.get("before") and not traced.get("after") and not traced.get("diff"):
+        return None
+    anchor = traced.get("anchor") or {}
     return {
-        "link": link,
-        "confidence": confidence,
-        "file": path,
-        "line_start": line0,
-        "line_end": line1,
-        "commit_sha": sha,
-        "commit_message": commit.get("message") or commit.get("title") or "",
-        "commit_created_at": commit.get("created_at") or commit.get("committed_date"),
-        "before": before,
-        "after": after or diff_text,
-        "diff": diff_text,
+        "link": traced["link"],
+        "status": traced["status"],
+        "confidence": traced["confidence"],
+        "file": anchor.get("file"),
+        "line_start": anchor.get("new_line_start") or anchor.get("old_line_start"),
+        "line_end": anchor.get("new_line_end") or anchor.get("old_line_end"),
+        "commit_sha": traced.get("commit_sha") or "",
+        "commit_message": traced.get("commit_message") or "",
+        "commit_created_at": traced.get("commit_created_at") or "",
+        "before": traced.get("before") or "",
+        "after": traced.get("after") or "",
+        "diff": traced.get("diff") or "",
     }
 
 

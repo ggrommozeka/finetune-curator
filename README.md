@@ -214,7 +214,11 @@ python -m scripts.export_gitlab_mrr sync \
 
 `--project group/app` (repeatable) limits the sync to specific projects. `--insecure` disables TLS verification.
 
-**Phase 2 — process offline.** Pick MRs in the viewer (**GitLab** page: filter by project, author, reviewer, date, MRR-fix commits, comment count) or on the CLI. Processing links each review comment to a later commit whose message matches `MRR fixes` (case-insensitive regex, `--fix-pattern`):
+Comments from every reviewer are stored, with the author's role on the MR (author, reviewer, assignee, or commenter). `--reviewer` is an optional exact filter, not the default.
+
+Each comment keeps its anchor: diff SHAs (`base` / `start` / `head`), file path, old and new line range, and the snippet those lines pointed at. Processing then walks later commits in order and follows line movement, so a fix is found even if an earlier commit shifted the line. `MRR fixes` commits are preferred, but any later commit that changes the anchored lines still counts. Threads remember whether they were resolved, by whom, and the replies. Status is `linked` (with a confidence), `addressed_elsewhere`, `not_addressed`, or `unclear`.
+
+**Phase 2 — process offline.** Pick MRs in the viewer (**GitLab** page: filter by project, author, reviewer, date, MRR-fix commits, comment count) or on the CLI. The GitLab page shows a timeline for each comment — anchored code, the commits that moved or changed those lines, and a side-by-side before/after — plus link stats for the MR and for the whole store (share with a fix, by reviewer, by file). A manual link (another commit/hunk, or "not addressed") is stored separately and overrides the automatic one on the next process. Automatic linking uses `--fix-pattern` (default `MRR fixes`, case-insensitive):
 
 1. same file and overlapping lines (confidence 0.9)
 2. same file, lines do not overlap (confidence 0.55)

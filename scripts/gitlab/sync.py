@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import urllib.parse
 from datetime import datetime
 
 from scripts.gitlab.client import quote_id
-from scripts.gitlab.examples import apply_anonymization
-from scripts.gitlab.export import list_merge_requests, records_from_bundle
+from scripts.gitlab.anonymize import Anonymizer
+from scripts.gitlab.export import list_merge_requests
 from scripts.gitlab.link import DEFAULT_FIX_PATTERN
 from scripts.gitlab.store import GitlabStore
 
@@ -195,6 +196,55 @@ def _is_refresh(refresh_refs: list[str], project_id: int, iid: int, path: str, s
     return False
 
 
+def _anonymize_traces(traces: list[dict], *, strip_urls: bool) -> list[dict]:
+    anonymizer = Anonymizer(strip_urls=strip_urls)
+    for trace in traces:
+        anonymizer.register_author(
+            {"username": trace.get("author_username"), "name": trace.get("author_name")}
+        )
+        anonymizer.register_author(trace.get("commit_author") or {})
+        for reply in trace.get("replies") or []:
+            anonymizer.register_author(
+                {"username": reply.get("author_username"), "name": reply.get("author_name")}
+            )
+        resolved_by = trace.get("resolved_by") or ""
+        if resolved_by:
+            anonymizer.register_author({"username": resolved_by, "name": resolved_by})
+    cleaned = []
+    for trace in traces:
+        item = json.loads(json.dumps(trace))
+        viewed = anonymizer.author_view(
+            {"username": trace.get("author_username"), "name": trace.get("author_name")}
+        )
+        item["author_username"] = viewed.get("username") or ""
+        item["author_name"] = viewed.get("name") or ""
+        if item.get("resolved_by"):
+            item["resolved_by"] = anonymizer.author_view({"username": trace.get("resolved_by")}).get("username") or ""
+        item["body"] = anonymizer.text(item.get("body") or "")
+        item["before"] = anonymizer.text(item.get("before") or "")
+        item["after"] = anonymizer.text(item.get("after") or "")
+        item["diff"] = anonymizer.text(item.get("diff") or "")
+        anchor = dict(item.get("anchor") or {})
+        anchor["snippet"] = anonymizer.text(anchor.get("snippet") or "")
+        item["anchor"] = anchor
+        replies = []
+        for reply in item.get("replies") or []:
+            reply = dict(reply)
+            reply_view = anonymizer.author_view(
+                {"username": reply.get("author_username"), "name": reply.get("author_name")}
+            )
+            reply["author_username"] = reply_view.get("username") or ""
+            reply["author_name"] = reply_view.get("name") or ""
+            reply["body"] = anonymizer.text(reply.get("body") or "")
+            replies.append(reply)
+        item["replies"] = replies
+        author = item.get("commit_author") or {}
+        if author:
+            item["commit_author"] = anonymizer.author_view(author)
+        cleaned.append(item)
+    return cleaned
+
+
 def process_store(
     store: GitlabStore,
     refs: list[str],
@@ -213,21 +263,32 @@ def process_store(
         bundle = store.load_bundle(project_id, iid)
         if bundle is None:
             raise KeyError(ref)
-        records, stats = records_from_bundle(
-            bundle["mr"],
+        from scripts.gitlab.export import records_from_traces
+        from scripts.gitlab.trace import build_traces
+
+        overrides = store.overrides_for(project_id, iid)
+        traces = build_traces(
             bundle["discussions"],
             bundle["commits"],
             bundle["diffs_by_sha"],
+            bundle["mr"],
             reviewer=reviewer,
             fix_pattern=fix_pattern,
             line_pad=line_pad,
-            max_chars=max_chars,
+            files=bundle.get("files") or [],
+            overrides=overrides,
         )
         if anonymize or anonymize_urls:
-            records = apply_anonymization(records, strip_urls=anonymize_urls)
-        else:
+            traces = _anonymize_traces(traces, strip_urls=anonymize_urls)
+        store.replace_traces(project_id, iid, traces)
+        records, stats = records_from_traces(bundle["mr"], traces, max_chars)
+        if anonymize_urls:
             for record in records:
-                record.pop("_authors", None)
+                gitlab = record.get("gitlab") or {}
+                gitlab.pop("web_url", None)
+                record["gitlab"] = gitlab
+        for record in records:
+            record.pop("_authors", None)
         store.replace_examples(project_id, iid, records)
         totals["merge_requests"] += 1
         totals["examples"] += len(records)

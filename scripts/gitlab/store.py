@@ -11,7 +11,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.gitlab.link import DEFAULT_FIX_PATTERN, comment_target, is_fix_message
+from scripts.gitlab.link import DEFAULT_FIX_PATTERN, is_fix_message
+from scripts.gitlab.trace import author_role, extract_anchor, snippet_for_anchor, summarize_traces
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS merge_requests (
@@ -36,12 +37,23 @@ CREATE TABLE IF NOT EXISTS notes (
   project_id INTEGER NOT NULL,
   mr_iid INTEGER NOT NULL,
   note_id TEXT NOT NULL,
+  discussion_id TEXT,
   author_username TEXT,
   author_name TEXT,
+  author_role TEXT,
   body TEXT,
   created_at TEXT,
   resolved INTEGER,
+  resolved_by TEXT,
   file_path TEXT,
+  base_sha TEXT,
+  start_sha TEXT,
+  head_sha TEXT,
+  old_line_start INTEGER,
+  old_line_end INTEGER,
+  new_line_start INTEGER,
+  new_line_end INTEGER,
+  snippet TEXT,
   raw_json TEXT NOT NULL,
   PRIMARY KEY (project_id, note_id)
 );
@@ -88,6 +100,27 @@ CREATE TABLE IF NOT EXISTS example_decisions (
   user_text TEXT,
   assistant_text TEXT,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS traces (
+  project_id INTEGER NOT NULL,
+  mr_iid INTEGER NOT NULL,
+  note_id TEXT NOT NULL,
+  author_username TEXT,
+  author_role TEXT,
+  file_path TEXT,
+  status TEXT NOT NULL,
+  confidence REAL,
+  trace_json TEXT NOT NULL,
+  PRIMARY KEY (project_id, note_id)
+);
+CREATE TABLE IF NOT EXISTS link_overrides (
+  project_id INTEGER NOT NULL,
+  note_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  commit_sha TEXT,
+  hunk_index INTEGER,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, note_id)
 );
 """
 
@@ -195,25 +228,40 @@ class GitlabStore:
                 for note in discussion.get("notes") or []:
                     if not isinstance(note, dict) or note.get("system"):
                         continue
-                    path, _start, _end = comment_target(note)
                     note_author = note.get("author") or {}
+                    username = note_author.get("username") or ""
+                    anchor = extract_anchor(note)
+                    anchor["snippet"] = snippet_for_anchor(anchor, files)
                     self._conn.execute(
                         """
                         INSERT OR REPLACE INTO notes (
-                          project_id, mr_iid, note_id, author_username, author_name, body,
-                          created_at, resolved, file_path, raw_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          project_id, mr_iid, note_id, discussion_id, author_username, author_name,
+                          author_role, body, created_at, resolved, resolved_by, file_path,
+                          base_sha, start_sha, head_sha, old_line_start, old_line_end,
+                          new_line_start, new_line_end, snippet, raw_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             project_id,
                             iid,
                             str(note.get("id")),
-                            note_author.get("username") or "",
+                            str(discussion.get("id") or ""),
+                            username,
                             note_author.get("name") or "",
+                            author_role(mr, username),
                             note.get("body") or "",
                             note.get("created_at") or "",
                             1 if note.get("resolved") else 0,
-                            path or "",
+                            ((note.get("resolved_by") or {}).get("username") or ""),
+                            anchor.get("file") or "",
+                            anchor.get("base_sha") or "",
+                            anchor.get("start_sha") or "",
+                            anchor.get("head_sha") or "",
+                            anchor.get("old_line_start"),
+                            anchor.get("old_line_end"),
+                            anchor.get("new_line_start"),
+                            anchor.get("new_line_end"),
+                            anchor.get("snippet") or "",
                             json.dumps(note, ensure_ascii=False),
                         ),
                     )
@@ -514,3 +562,90 @@ class GitlabStore:
                 gitlab["after"] = decision["assistant_text"]
             exported.append({**record, "messages": messages, "gitlab": gitlab, "decision": state})
         return exported
+
+    def overrides_for(self, project_id: int, iid: int) -> dict[str, dict]:
+        note_ids = [
+            row["note_id"]
+            for row in self._conn.execute(
+                "SELECT note_id FROM notes WHERE project_id = ? AND mr_iid = ?",
+                (int(project_id), int(iid)),
+            )
+        ]
+        if not note_ids:
+            return {}
+        found = {}
+        for row in self._conn.execute(
+            f"SELECT * FROM link_overrides WHERE project_id = ? AND note_id IN ({','.join('?' * len(note_ids))})",
+            (int(project_id), *note_ids),
+        ):
+            found[row["note_id"]] = dict(row)
+        return found
+
+    def set_link_override(
+        self,
+        project_id: int,
+        note_id: str,
+        status: str,
+        *,
+        commit_sha: str | None = None,
+        hunk_index: int | None = None,
+    ) -> None:
+        allowed = {"linked", "addressed_elsewhere", "not_addressed", "unclear"}
+        if status not in allowed:
+            raise ValueError(f"unknown link status {status}")
+        self._conn.execute(
+            """
+            INSERT INTO link_overrides (project_id, note_id, status, commit_sha, hunk_index, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id, note_id) DO UPDATE SET
+              status = excluded.status,
+              commit_sha = excluded.commit_sha,
+              hunk_index = excluded.hunk_index,
+              updated_at = excluded.updated_at
+            """,
+            (int(project_id), str(note_id), status, commit_sha or "", hunk_index, utc_now()),
+        )
+        self._conn.commit()
+
+    def replace_traces(self, project_id: int, iid: int, traces: list[dict]) -> None:
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM traces WHERE project_id = ? AND mr_iid = ?",
+                (int(project_id), int(iid)),
+            )
+            for trace in traces:
+                anchor = trace.get("anchor") or {}
+                self._conn.execute(
+                    """
+                    INSERT INTO traces (
+                      project_id, mr_iid, note_id, author_username, author_role, file_path,
+                      status, confidence, trace_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(project_id),
+                        int(iid),
+                        str(trace.get("note_id")),
+                        trace.get("author_username") or "",
+                        trace.get("author_role") or "",
+                        anchor.get("file") or "",
+                        trace.get("status") or "unclear",
+                        trace.get("confidence"),
+                        json.dumps(trace, ensure_ascii=False),
+                    ),
+                )
+
+    def traces_for(self, project_id: int | None = None, iid: int | None = None) -> list[dict]:
+        if project_id is None:
+            rows = self._conn.execute("SELECT trace_json FROM traces").fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT trace_json FROM traces WHERE project_id = ? AND mr_iid = ?",
+                (int(project_id), int(iid)),
+            ).fetchall()
+        traces = [json.loads(row["trace_json"]) for row in rows]
+        traces.sort(key=lambda item: item.get("created_at") or "")
+        return traces
+
+    def link_stats(self, project_id: int | None = None, iid: int | None = None) -> dict:
+        return summarize_traces(self.traces_for(project_id, iid))

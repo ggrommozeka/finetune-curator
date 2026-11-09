@@ -62,6 +62,25 @@ def anonymize_record(record: dict, anonymizer: Anonymizer) -> dict:
         author = gitlab.get(author_key)
         if isinstance(author, dict) and author:
             gitlab[author_key] = anonymizer.author_view(author)
+    if gitlab.get("resolved_by"):
+        gitlab["resolved_by"] = anonymizer.author_view({"username": gitlab["resolved_by"]}).get("username") or ""
+    replies = []
+    for reply in gitlab.get("replies") or []:
+        reply = dict(reply)
+        view = anonymizer.author_view(
+            {"username": reply.get("author_username"), "name": reply.get("author_name")}
+        )
+        reply["author_username"] = view.get("username") or ""
+        reply["author_name"] = view.get("name") or ""
+        reply["body"] = anonymizer.text(str(reply.get("body") or ""))
+        replies.append(reply)
+    if gitlab.get("replies") is not None:
+        gitlab["replies"] = replies
+    anchor = gitlab.get("anchor")
+    if isinstance(anchor, dict):
+        anchor = dict(anchor)
+        anchor["snippet"] = anonymizer.text(str(anchor.get("snippet") or ""))
+        gitlab["anchor"] = anchor
     if anonymizer.strip_urls:
         gitlab.pop("web_url", None)
     for key in ("comment", "before", "after", "diff", "commit_message", "file"):

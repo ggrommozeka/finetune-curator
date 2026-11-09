@@ -106,6 +106,10 @@ def render_gitlab_page(cli) -> None:
             st.info("Нет MR под текущие фильтры.")
             return
 
+        overall = store.link_stats()
+        if overall["total"]["comments"]:
+            _render_stats(overall, "Все MR в хранилище")
+
         current = st.selectbox("Merge request", list(labels), format_func=lambda ref: labels[ref])
         summary = next(row for row in rows if row["ref"] == current)
         _render_mr(
@@ -153,20 +157,19 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
         mark = "FIX" if is_fix_message(commit.get("message") or commit.get("title") or "", fix_pattern) else "commit"
         st.caption(f"{mark}  {commit.get('id', '')[:10]}  {message}")
 
-    st.markdown("**Комментарии**")
-    from scripts.gitlab.link import flatten_notes
+    traces = store.traces_for(project_id, iid)
+    if traces:
+        _render_stats(store.link_stats(project_id, iid), "Этот MR")
+        st.markdown("**Цепочка: комментарий → якорь → фикс → код**")
+        for trace in traces:
+            _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymize_urls)
+    else:
+        st.markdown("**Комментарии**")
+        from scripts.gitlab.link import flatten_notes
 
-    for note in flatten_notes(bundle["discussions"], reviewer):
-        author = (note.get("author") or {}).get("username") or ""
-        st.text(f"{author}: {note.get('body') or ''}")
-
-    if bundle["diffs_by_sha"]:
-        with st.expander("Diffs фикс-коммитов и остальные diff"):
-            for sha, diffs in bundle["diffs_by_sha"].items():
-                st.caption(sha[:12])
-                for diff in diffs:
-                    st.caption(diff.get("new_path") or diff.get("old_path") or "")
-                    st.code(diff.get("diff") or "", language="diff")
+        for note in flatten_notes(bundle["discussions"], reviewer):
+            author = (note.get("author") or {}).get("username") or ""
+            st.text(f"{author}: {note.get('body') or ''}")
 
     if st.button("Обработать этот MR", key=f"proc_{project_id}_{iid}"):
         process_store(
@@ -186,6 +189,114 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
     st.markdown(f"**Примеры ({len(examples)})**")
     for item in examples:
         _render_example(store, item)
+
+
+def _render_stats(stats: dict, title: str) -> None:
+    total = stats.get("total") or {}
+    comments = total.get("comments") or 0
+    linked = total.get("linked") or 0
+    share = total.get("with_fix_share") or 0
+    st.markdown(f"**{title}**")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Комментарии", comments)
+    c2.metric("С фиксом", linked)
+    c3.metric("Доля", f"{share:.0%}")
+    c4.metric("Не закрыты", total.get("not_addressed") or 0)
+    if stats.get("by_reviewer"):
+        st.caption(
+            "По ревьюерам: "
+            + ", ".join(
+                f"{name} {row['linked']}/{row['comments']}" for name, row in stats["by_reviewer"].items()
+            )
+        )
+    if stats.get("by_file"):
+        st.caption(
+            "По файлам: "
+            + ", ".join(f"{name} {row['linked']}/{row['comments']}" for name, row in stats["by_file"].items())
+        )
+
+
+def _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymize_urls) -> None:
+    from scripts.gitlab.link import parse_hunks
+
+    anchor = trace.get("anchor") or {}
+    note_id = str(trace.get("note_id"))
+    st.markdown(
+        f"`{trace.get('author_username') or '—'}` ({trace.get('author_role') or 'commenter'}) · "
+        f"{trace.get('status')} · {trace.get('confidence')}"
+        + (" · вручную" if trace.get("manual") else "")
+    )
+    st.text(trace.get("body") or "")
+    if trace.get("resolved"):
+        st.caption(f"Тред resolved{(' · ' + trace['resolved_by']) if trace.get('resolved_by') else ''}")
+    for reply in trace.get("replies") or []:
+        st.caption(f"↳ {reply.get('author_username') or ''}: {reply.get('body') or ''}")
+    file_label = anchor.get("file") or "(нет файла)"
+    lines = anchor.get("new_line_start") or anchor.get("old_line_start")
+    shas = " ".join(
+        part
+        for part in (
+            f"base {anchor.get('base_sha', '')[:8]}" if anchor.get("base_sha") else "",
+            f"head {anchor.get('head_sha', '')[:8]}" if anchor.get("head_sha") else "",
+        )
+        if part
+    )
+    st.caption(f"{file_label} · line {lines or '—'} · {shas}")
+    if anchor.get("snippet"):
+        st.markdown("**Якорь**")
+        st.code(anchor["snippet"], language="text")
+    commits = trace.get("changed_by") or []
+    if commits:
+        st.caption(
+            "Коммиты, сдвинувшие или изменившие строки: "
+            + ", ".join(f"{item['sha'][:8]}{'*' if item.get('preferred') else ''}" for item in commits)
+        )
+    left, right = st.columns(2)
+    left.markdown("**До**")
+    left.code(trace.get("before") or "—", language="text")
+    right.markdown("**После**")
+    right.code(trace.get("after") or "—", language="text")
+    if trace.get("diff"):
+        with st.expander("Diff якоря"):
+            st.code(trace["diff"], language="diff")
+
+    commit_ids = [str(commit.get("id") or "") for commit in bundle["commits"] if commit.get("id")]
+    if commit_ids:
+        picked = st.selectbox("Коммит связи", commit_ids, key=f"ov_sha_{note_id}")
+        hunks = []
+        for diff in bundle["diffs_by_sha"].get(picked) or []:
+            hunks.extend(parse_hunks(diff.get("diff") or ""))
+        labels = [f"{index}: {(hunk.text.splitlines() or ['hunk'])[0][:80]}" for index, hunk in enumerate(hunks)] or ["0"]
+        hunk_label = st.selectbox("Ханк", labels, key=f"ov_hunk_{note_id}")
+        hunk_index = labels.index(hunk_label) if hunk_label in labels else 0
+        b1, b2 = st.columns(2)
+        if b1.button("Поставить эту связь", key=f"ov_set_{note_id}"):
+            store.set_link_override(
+                summary["project_id"],
+                note_id,
+                "linked",
+                commit_sha=picked,
+                hunk_index=hunk_index,
+            )
+            process_store(
+                store,
+                [summary["ref"]],
+                fix_pattern=fix_pattern,
+                anonymize=anonymize,
+                anonymize_urls=anonymize_urls,
+            )
+            st.rerun()
+        if b2.button("Не исправлено", key=f"ov_none_{note_id}"):
+            store.set_link_override(summary["project_id"], note_id, "not_addressed")
+            process_store(
+                store,
+                [summary["ref"]],
+                fix_pattern=fix_pattern,
+                anonymize=anonymize,
+                anonymize_urls=anonymize_urls,
+            )
+            st.rerun()
+    st.markdown("---")
 
 
 def _render_example(store: GitlabStore, item: dict) -> None:

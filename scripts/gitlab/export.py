@@ -6,14 +6,7 @@ from datetime import datetime
 
 from scripts.gitlab.client import merge_request_path
 from scripts.gitlab.examples import apply_anonymization, build_sft_record
-from scripts.gitlab.link import (
-    DEFAULT_FIX_PATTERN,
-    fix_commits,
-    flatten_notes,
-    in_range,
-    link_comment,
-    parse_time,
-)
+from scripts.gitlab.link import DEFAULT_FIX_PATTERN, fix_commits, in_range, parse_time
 
 
 def _mr_moment(mr: dict) -> datetime | None:
@@ -68,27 +61,68 @@ def records_from_bundle(
     max_chars: int,
 ) -> tuple[list[dict], dict]:
     """Link comments to fixes using only data already in memory."""
-    stats = {"comments": 0, "file_line": 0, "file": 0, "mr": 0, "unlinked": 0}
-    notes = flatten_notes(discussions, reviewer)
-    stats["comments"] = len(notes)
-    fixes = fix_commits(commits, fix_pattern)
+    from scripts.gitlab.trace import build_traces
+
+    traces = build_traces(
+        discussions,
+        commits,
+        diffs_by_sha,
+        mr,
+        reviewer=reviewer,
+        fix_pattern=fix_pattern,
+        line_pad=line_pad,
+    )
+    return records_from_traces(mr, traces, max_chars=max_chars)
+
+
+def records_from_traces(mr: dict, traces: list[dict], max_chars: int) -> tuple[list[dict], dict]:
+    stats = {"comments": len(traces), "file_line": 0, "file": 0, "mr": 0, "unlinked": 0, "linked": 0}
     records = []
-    for note in notes:
-        linked = link_comment(note, fixes, diffs_by_sha, line_pad=line_pad)
-        if not linked:
+    for traced in traces:
+        status = traced.get("status")
+        if status == "linked":
+            stats["linked"] += 1
+        if status not in {"linked", "addressed_elsewhere"}:
             stats["unlinked"] += 1
             continue
-        commit = next((item for item in fixes if str(item.get("id") or "") == linked.get("commit_sha")), {})
-        linked["commit_author"] = commit.get("author") if isinstance(commit.get("author"), dict) else {
-            "name": commit.get("author_name"),
-            "email": commit.get("author_email"),
+        note = {
+            "id": traced.get("note_id"),
+            "body": traced.get("body") or "",
+            "created_at": traced.get("created_at") or "",
+            "resolved": traced.get("resolved"),
+            "author": {
+                "username": traced.get("author_username") or "",
+                "name": traced.get("author_name") or "",
+            },
+        }
+        anchor = traced.get("anchor") or {}
+        linked = {
+            "link": traced.get("link"),
+            "confidence": traced.get("confidence"),
+            "file": anchor.get("file"),
+            "line_start": anchor.get("new_line_start") or anchor.get("old_line_start"),
+            "line_end": anchor.get("new_line_end") or anchor.get("old_line_end"),
+            "commit_sha": traced.get("commit_sha") or "",
+            "commit_message": traced.get("commit_message") or "",
+            "commit_created_at": traced.get("commit_created_at") or "",
+            "before": traced.get("before") or "",
+            "after": traced.get("after") or "",
+            "diff": traced.get("diff") or "",
+            "commit_author": traced.get("commit_author") or {},
         }
         record = build_sft_record(mr, note, linked, max_chars=max_chars)
         if record is None:
             stats["unlinked"] += 1
             continue
+        record["gitlab"]["link_status"] = status
+        record["gitlab"]["author_role"] = traced.get("author_role") or ""
+        record["gitlab"]["resolved_by"] = traced.get("resolved_by") or ""
+        record["gitlab"]["replies"] = traced.get("replies") or []
+        record["gitlab"]["anchor"] = anchor
+        record["gitlab"]["manual"] = bool(traced.get("manual"))
         kind = linked["link"]
-        stats[kind] = stats.get(kind, 0) + 1
+        if kind in stats:
+            stats[kind] += 1
         records.append(record)
     return records, stats
 
