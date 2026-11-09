@@ -90,6 +90,7 @@ def build_sft_record(mr: dict, note: dict, link: dict, *, max_chars: int = 8000)
             "note_created_at": note.get("created_at"),
             "resolved": note.get("resolved"),
             "web_url": mr.get("web_url"),
+            "reviewer": author.get("username") or "",
             "author": {"username": author.get("username"), "name": author.get("name")},
             "commit_author": {
                 "username": commit_author.get("username"),

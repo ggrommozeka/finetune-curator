@@ -218,6 +218,7 @@ def _anonymize_traces(traces: list[dict], *, strip_urls: bool) -> list[dict]:
             {"username": trace.get("author_username"), "name": trace.get("author_name")}
         )
         item["author_username"] = viewed.get("username") or ""
+        item["reviewer"] = viewed.get("username") or ""
         item["author_name"] = viewed.get("name") or ""
         if item.get("resolved_by"):
             item["resolved_by"] = anonymizer.author_view({"username": trace.get("resolved_by")}).get("username") or ""

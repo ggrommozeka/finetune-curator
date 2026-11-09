@@ -124,6 +124,7 @@ def records_from_traces(mr: dict, traces: list[dict], max_chars: int) -> tuple[l
             stats["unlinked"] += 1
             continue
         record["gitlab"]["link_status"] = status
+        record["gitlab"]["reviewer"] = traced.get("reviewer") or traced.get("author_username") or ""
         record["gitlab"]["author_role"] = traced.get("author_role") or ""
         record["gitlab"]["resolved_by"] = traced.get("resolved_by") or ""
         record["gitlab"]["replies"] = traced.get("replies") or []

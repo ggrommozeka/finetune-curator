@@ -1,8 +1,10 @@
-"""Team-lead identity and the MRR title flag.
+"""The one team lead, and the MRR title flag.
 
-Neither is hardcoded. A local ``gitlab.json``, ``FINETUNE_CURATOR_TEAM_LEADS`` /
-``FINETUNE_CURATOR_MRR_PATTERN``, or CLI flags supply them. Matching is
-case-insensitive against commit author and committer name, email, and username.
+There is a single team lead. ``aliases`` are that person's usernames, names,
+and emails, not a list of different people. A local ``gitlab.json``,
+``FINETUNE_CURATOR_TEAM_LEADS``, or ``--team-lead`` supply the aliases.
+Matching is case-insensitive against commit author and committer name, email,
+and username.
 """
 
 from __future__ import annotations
@@ -19,8 +21,14 @@ DEFAULT_CONFIG_NAMES = ("gitlab.json",)
 
 @dataclass(frozen=True)
 class SignalConfig:
+    """Aliases belong to one team lead. ``team_leads`` is that alias tuple."""
+
     team_leads: tuple[str, ...]
     mrr_pattern: str
+
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        return self.team_leads
 
     def pattern(self) -> re.Pattern[str]:
         return re.compile(self.mrr_pattern, re.IGNORECASE)
@@ -45,10 +53,7 @@ def load_signal_config(
         data = json.loads(candidate.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             break
-        raw_leads = data.get("team_leads") or []
-        if isinstance(raw_leads, str):
-            raw_leads = [raw_leads]
-        file_leads = [str(item) for item in raw_leads if str(item).strip()]
+        file_leads = _aliases_from_document(data)
         if data.get("mrr_pattern"):
             file_pattern = str(data["mrr_pattern"])
         break
@@ -57,6 +62,23 @@ def load_signal_config(
     chosen_pattern = mrr_pattern or os.environ.get("FINETUNE_CURATOR_MRR_PATTERN") or file_pattern
     normalized = tuple(dict.fromkeys(item.strip().lower() for item in chosen_leads if item and item.strip()))
     return SignalConfig(team_leads=normalized, mrr_pattern=chosen_pattern or DEFAULT_MRR_PATTERN)
+
+
+def _aliases_from_document(data: dict) -> list[str]:
+    """Read one identity. ``team_lead.aliases`` is preferred; ``team_leads`` is the same list."""
+    identity = data.get("team_lead")
+    raw = None
+    if isinstance(identity, dict):
+        raw = identity.get("aliases")
+    elif isinstance(identity, str):
+        raw = [identity]
+    elif isinstance(identity, list):
+        raw = identity
+    if raw is None:
+        raw = data.get("team_leads") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(item) for item in raw if str(item).strip()]
 
 
 def is_mrr_title(message: str, pattern: str = DEFAULT_MRR_PATTERN) -> bool:

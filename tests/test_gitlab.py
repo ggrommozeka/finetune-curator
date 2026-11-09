@@ -294,6 +294,34 @@ def test_comment_fix_and_team_lead_polish_are_separate():
     assert "Review comment:" not in kinds["team_lead_mrr"]["messages"][0]["content"]
 
 
+def test_one_team_lead_and_every_reviewer(tmp_path: Path):
+    from scripts.gitlab.signals import SignalConfig, load_signal_config
+
+    config_path = tmp_path / "gitlab.json"
+    config_path.write_text(
+        '{"team_lead": {"aliases": ["Lead@Company.com", "teamlead"]}, "mrr_pattern": "\\\\bmrr\\\\b"}\n',
+        encoding="utf-8",
+    )
+    loaded = load_signal_config(config_path)
+    assert loaded.aliases == ("lead@company.com", "teamlead")
+    assert SignalConfig(team_leads=("lead@company.com",), mrr_pattern=r"\bmrr\b").aliases == ("lead@company.com",)
+
+    client, store = _sync_client(tmp_path, FixtureTransport.from_file(FIXTURE))
+    sync_store(client, store, projects=["group/app"])
+    stats = process_store(store, ["1!7"], signal_config=loaded)
+    reviewers = {trace.get("reviewer") for trace in store.traces_for(1, 7)}
+    assert "teamlead" in reviewers
+    assert "otheruser" in reviewers
+    comment_examples = [
+        item["record"]["gitlab"].get("reviewer")
+        for item in store.examples_for(1, 7)
+        if item["record"].get("source") == "gitlab_review"
+    ]
+    assert comment_examples
+    assert stats["comments"] >= 4
+    store.close()
+
+
 def test_anonymizer_whole_words_only():
     anonymizer = Anonymizer(strip_urls=True)
     anonymizer.register_author({"username": "ann", "name": "Ann Example", "email": "ann@corp.test"})

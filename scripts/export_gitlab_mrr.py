@@ -89,9 +89,18 @@ def _add_http_args(parser: argparse.ArgumentParser) -> None:
 def _process_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mr", action="append", default=[], help="MR to process: project!iid. Repeatable.")
     parser.add_argument("--all", action="store_true", help="Process every MR in the store")
-    parser.add_argument("--reviewer", default=None, help="Only notes by this GitLab username")
+    parser.add_argument(
+        "--reviewer",
+        default=None,
+        help="Optional view filter. Omit it so training data keeps every reviewer's comments.",
+    )
     parser.add_argument("--config", default=None, help="JSON file with team_leads and mrr_pattern (default: gitlab.json if present)")
-    parser.add_argument("--team-lead", action="append", default=None, help="Team-lead username, name, or email. Repeatable.")
+    parser.add_argument(
+        "--team-lead",
+        action="append",
+        default=None,
+        help="Alias of the single team lead (username, name, or email). Repeatable.",
+    )
     parser.add_argument("--mrr-pattern", default=None, help="Case-insensitive regex for MRR polish titles (default: \\bmrr\\b)")
     parser.add_argument("--fix-pattern", default=None, help="Deprecated alias of --mrr-pattern")
     parser.add_argument("--summarize-polish", action="store_true", help="Ask the local model to label each team-lead hunk")

@@ -1,4 +1,6 @@
 {
-  "team_leads": ["team.lead", "lead@company.example"],
+  "team_lead": {
+    "aliases": ["team.lead", "lead@company.example"]
+  },
   "mrr_pattern": "\\bmrr\\b"
 }
