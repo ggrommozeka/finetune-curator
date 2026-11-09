@@ -221,17 +221,15 @@ def test_cluster_threshold_and_recommendation_kind(tmp_path: Path):
         success_note=None,
     )
     assert proposal["kind"] == "rule"
+    assert proposal["mode"] == "corpus"
     assert proposal["conflicts"]
+    assert proposal["session_ids"]
     narrow = dict(cluster)
     narrow["task_types"] = 1
     narrow["task_type_names"] = ["bugfix"]
     skill = recommend_cluster(narrow, complete, existing_rules=[], success_note="error type loop also appears in a success")
     assert skill["kind"] == "skill"
     assert any("success" in item for item in skill["conflicts"])
-    store.put_proposal(proposal)
-    store.set_proposal_status(proposal["id"], "approved", {"text": proposal["payload"]["text"]})
-    store.put_proposal(skill)
-    store.set_proposal_status(skill["id"], "approved", {"kind": "skill", "text": skill["payload"]["text"]})
     store.close()
 
 
@@ -248,8 +246,12 @@ def test_export_report_and_rollback(tmp_path: Path):
         return RECOMMENDATION
 
     proposal = recommend_cluster(cluster, complete, existing_rules=[], success_note=None)
-    store.put_proposal(proposal)
-    store.set_proposal_status(proposal["id"], "approved")
+    proposals = tmp_path / "proposals.json"
+    decisions = tmp_path / "decisions.json"
+    from scripts.rules.store import save_proposals, save_rule_decisions
+
+    save_proposals(proposals, {"version": 2, "proposals": [proposal]})
+    save_rule_decisions(decisions, {"statuses": {proposal["id"]: "approved"}, "edits": {}})
     rules_md = tmp_path / "rules.md"
     rules_json = tmp_path / "rules.json"
     skills = tmp_path / "skills"
@@ -259,6 +261,10 @@ def test_export_report_and_rollback(tmp_path: Path):
             "export",
             "--store",
             str(store_dir),
+            "--proposals",
+            str(proposals),
+            "--decisions",
+            str(decisions),
             "--rules-md",
             str(rules_md),
             "--rules-json",

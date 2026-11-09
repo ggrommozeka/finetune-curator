@@ -57,17 +57,6 @@ CREATE TABLE IF NOT EXISTS cluster_members (
   global_id TEXT NOT NULL,
   PRIMARY KEY (cluster_id, global_id)
 );
-CREATE TABLE IF NOT EXISTS proposals (
-  id TEXT PRIMARY KEY,
-  cluster_id TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  conflicts_json TEXT NOT NULL,
-  evidence_json TEXT NOT NULL,
-  status TEXT NOT NULL,
-  edited_json TEXT,
-  updated_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS versions (
   id TEXT PRIMARY KEY,
   adopted_at TEXT NOT NULL,
@@ -259,70 +248,6 @@ class PatternStore:
             found.append(json.loads(row["summary_json"]))
         found.sort(key=lambda item: (-(item["frequency"] * (item["fail_rate"] or 0)), item["id"]))
         return found
-
-    def put_proposal(self, proposal: dict) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO proposals (
-              id, cluster_id, kind, payload_json, conflicts_json, evidence_json, status, edited_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              kind = excluded.kind,
-              payload_json = excluded.payload_json,
-              conflicts_json = excluded.conflicts_json,
-              evidence_json = excluded.evidence_json,
-              updated_at = excluded.updated_at
-            """,
-            (
-                proposal["id"],
-                proposal["cluster_id"],
-                proposal["kind"],
-                json.dumps(proposal.get("payload") or {}, ensure_ascii=False),
-                json.dumps(proposal.get("conflicts") or [], ensure_ascii=False),
-                json.dumps(proposal.get("evidence") or {}, ensure_ascii=False),
-                proposal.get("status") or "pending",
-                json.dumps(proposal.get("edited") or {}, ensure_ascii=False) if proposal.get("edited") else None,
-                utc_now(),
-            ),
-        )
-        self._conn.commit()
-
-    def proposals(self, status: str | None = None) -> list[dict]:
-        rows = self._conn.execute("SELECT * FROM proposals ORDER BY id").fetchall()
-        found = []
-        for row in rows:
-            if status and row["status"] != status:
-                continue
-            edited = json.loads(row["edited_json"]) if row["edited_json"] else {}
-            payload = json.loads(row["payload_json"])
-            payload.update(edited)
-            found.append(
-                {
-                    "id": row["id"],
-                    "cluster_id": row["cluster_id"],
-                    "kind": edited.get("kind") or row["kind"],
-                    "status": row["status"],
-                    "payload": payload,
-                    "conflicts": json.loads(row["conflicts_json"]),
-                    "evidence": json.loads(row["evidence_json"]),
-                }
-            )
-        return found
-
-    def set_proposal_status(self, proposal_id: str, status: str, edited: dict | None = None) -> None:
-        if status not in {"pending", "approved", "rejected"}:
-            raise ValueError(status)
-        current = self._conn.execute("SELECT edited_json FROM proposals WHERE id = ?", (proposal_id,)).fetchone()
-        if current is None:
-            raise KeyError(proposal_id)
-        previous = json.loads(current["edited_json"]) if current["edited_json"] else {}
-        if edited:
-            previous.update(edited)
-        self._conn.execute(
-            "UPDATE proposals SET status = ?, edited_json = ?, updated_at = ? WHERE id = ?",
-            (status, json.dumps(previous, ensure_ascii=False), utc_now(), proposal_id),
-        )
-        self._conn.commit()
 
     def add_version(self, version_id: str, manifest: dict, note: str = "") -> None:
         self._conn.execute(

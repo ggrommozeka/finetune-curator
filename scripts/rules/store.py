@@ -43,7 +43,9 @@ def normalize_proposal(item: dict) -> dict:
         "evidence": str(item.get("evidence") or "").strip(),
         "steps": [str(step) for step in steps if str(step).strip()],
         "examples": [str(example) for example in examples if str(example).strip()],
-        "conflicts": [str(item) for item in (item.get("conflicts") or [])],
+        "conflicts": [str(conflict) for conflict in (item.get("conflicts") or [])],
+        "mode": str(item.get("mode") or ""),
+        "cluster_id": str(item.get("cluster_id") or ""),
     }
 
 
@@ -172,15 +174,24 @@ def public_rule(rule: dict) -> dict:
     }
 
 
-def upsert_proposals(path: Path, new_items: list[dict], *, mode: str | None = None) -> dict:
-    """Merge proposals into the shared file by id. Decisions are left untouched."""
+def upsert_proposals(path: Path, new_items: list[dict], *, mode: str | None = None, drop_modes: set[str] | None = None) -> dict:
+    """Merge proposals into the shared file by id. Decisions are left untouched.
+
+    ``drop_modes`` removes earlier proposals (for example per-session drafts)
+    when a corpus run replaces them.
+    """
     document = load_proposals(path) if path.exists() else {"version": 2, "proposals": []}
-    by_id = {item["id"]: item for item in document.get("proposals") or []}
+    drop_modes = drop_modes or set()
+    by_id = {
+        item["id"]: item
+        for item in document.get("proposals") or []
+        if item.get("mode") not in drop_modes
+    }
     for item in new_items:
         proposal = normalize_proposal(item)
+        if mode:
+            proposal["mode"] = mode
         if not proposal["id"]:
-            continue
-        if mode and by_id.get(proposal["id"], {}).get("mode") not in (None, mode) and proposal["id"] in by_id:
             continue
         by_id[proposal["id"]] = proposal
     merged = {

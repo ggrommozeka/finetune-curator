@@ -17,9 +17,8 @@ from scripts.patterns.cluster import cluster_annotations, embed_texts
 from scripts.patterns.import_sources import import_gitlab_traces, import_path
 from scripts.patterns.monitor import report, rollback, snapshot_version
 from scripts.patterns.recommend import recommend_pending
-from scripts.patterns.skills import write_skill
 from scripts.patterns.store import PatternStore
-from scripts.rules.export import render_json, render_markdown
+from scripts.rules.export import export_approved, export_skills
 from scripts.rules.llm import chat_complete, thinking_controls
 from scripts.rules.parsing import ModelOutputError
 
@@ -92,13 +91,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     rec = sub.add_parser("recommend", help="Propose a rule or a skill per cluster")
     rec.add_argument("--store", default="data/patterns")
+    rec.add_argument("--proposals", default="data/rule_proposals.json")
     rec.add_argument("--existing-rules", default=None, help="JSON file of current rules to conflict-check")
     _add_llm(rec)
 
     exp = sub.add_parser("export", help="Write approved rules and skills, and record a version")
     exp.add_argument("--store", default="data/patterns")
-    exp.add_argument("--rules-md", default="data/patterns_rules.md")
-    exp.add_argument("--rules-json", default="data/patterns_rules.json")
+    exp.add_argument("--proposals", default="data/rule_proposals.json")
+    exp.add_argument("--decisions", default="data/rule_decisions.json")
+    exp.add_argument("--rules-md", default="data/approved_rules.md")
+    exp.add_argument("--rules-json", default="data/approved_rules.json")
     exp.add_argument("--skills-dir", default="skills")
     exp.add_argument("--version", default=None)
 
@@ -122,47 +124,29 @@ def _existing_rules(path: str | None) -> list[str]:
 
 
 def _cmd_export(args) -> None:
+    """Export through the shared rules/skills writer, then snapshot that version."""
+    proposals = Path(args.proposals)
+    decisions = Path(args.decisions)
+    if not proposals.exists():
+        raise SystemExit(f"Proposals file not found: {proposals}")
+    rules_md = Path(args.rules_md)
+    rules_json = Path(args.rules_json)
+    skills_dir = Path(args.skills_dir)
+    result = export_approved(proposals, decisions, rules_md, rules_json)
+    skills = export_skills(proposals, decisions, skills_dir)
     store = _store(args.store)
     try:
-        approved = [row for row in store.proposals() if row["status"] == "approved"]
-        rules = []
-        for proposal in approved:
-            if proposal["kind"] != "rule":
-                continue
-            payload = proposal["payload"]
-            evidence = proposal["evidence"]
-            rules.append(
-                {
-                    "id": proposal["id"],
-                    "text": payload.get("text") or "",
-                    "category": payload.get("category") or "other",
-                    "rationale": payload.get("rationale") or "",
-                    "session_ids": evidence.get("session_ids") or [],
-                    "evidence": payload.get("description") or "",
-                }
-            )
-        rules_md = Path(args.rules_md)
-        rules_json = Path(args.rules_json)
-        rules_md.parent.mkdir(parents=True, exist_ok=True)
-        rules_md.write_text(render_markdown(rules), encoding="utf-8")
-        rules_json.write_text(render_json(rules), encoding="utf-8")
-        skills_dir = Path(args.skills_dir)
-        written = []
-        for proposal in approved:
-            if proposal["kind"] != "skill":
-                continue
-            written.append(str(write_skill(skills_dir, proposal)))
         version = args.version or f"v{len(store.versions()) + 1}"
         snapshot_version(
             store,
             version,
             [rules_md, rules_json, skills_dir],
-            note=f"rules={len(rules)} skills={len(written)}",
+            note=f"rules={result['approved']} skills={skills['skills']}",
         )
     finally:
         store.close()
-    print(f"Rules: {len(rules)} -> {rules_md}")
-    print(f"Skills: {len(written)} -> {skills_dir}")
+    print(f"Rules: {result['approved']} -> {rules_md}")
+    print(f"Skills: {skills['skills']} -> {skills_dir}")
     print(f"Version: {version}")
 
 
@@ -232,7 +216,12 @@ def main(argv: list[str] | None = None) -> None:
             complete, _model = _complete_from_args(args)
             store = _store(args.store)
             try:
-                stats = recommend_pending(store, complete, existing_rules=_existing_rules(args.existing_rules))
+                stats = recommend_pending(
+                    store,
+                    complete,
+                    proposals_path=Path(args.proposals),
+                    existing_rules=_existing_rules(args.existing_rules),
+                )
             finally:
                 store.close()
             print(f"Proposals: {stats['proposals']}")

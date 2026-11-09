@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from scripts.patterns.store import PatternStore
 from scripts.rules.merge import similarity_scores
 from scripts.rules.parsing import ModelOutputError, extract_json
+from scripts.rules.store import upsert_proposals
 
 RULE_TASK_SPREAD = 3
 
@@ -76,34 +79,38 @@ def recommend_cluster(cluster: dict, complete_fn, *, existing_rules: list[str], 
         "id": "p_" + cluster["id"],
         "cluster_id": cluster["id"],
         "kind": kind,
-        "status": "pending",
-        "payload": {
-            "title": str(payload.get("title") or cluster.get("label") or "pattern").strip(),
-            "description": str(payload.get("description") or "").strip(),
-            "text": text,
-            "steps": [str(step) for step in (payload.get("steps") or [])],
-            "examples": [str(item) for item in (payload.get("examples") or [])],
-            "rationale": str(payload.get("rationale") or "").strip(),
-            "category": "looping" if cluster.get("error_type") == "loop" else "other",
-        },
+        "mode": "corpus",
+        "text": text,
+        "title": str(payload.get("title") or cluster.get("label") or "pattern").strip(),
+        "description": str(payload.get("description") or "").strip(),
+        "steps": [str(step) for step in (payload.get("steps") or [])],
+        "examples": [str(example) for example in (payload.get("examples") or [])],
+        "rationale": str(payload.get("rationale") or "").strip(),
+        "category": "looping" if cluster.get("error_type") == "loop" else "other",
+        "session_ids": cluster.get("session_ids") or [],
+        "evidence": str(payload.get("description") or "").strip(),
         "conflicts": conflicts,
-        "evidence": {
-            "session_ids": cluster.get("session_ids") or [],
-            "frequency": cluster.get("frequency"),
-            "task_types": cluster.get("task_type_names") or [],
-            "projects": cluster.get("project_names") or [],
-            "machines": cluster.get("machine_names") or [],
-            "fail_rate": cluster.get("fail_rate"),
-        },
     }
 
 
-def recommend_pending(store: PatternStore, complete_fn, *, existing_rules: list[str] | None = None) -> dict:
+def recommend_pending(
+    store: PatternStore,
+    complete_fn,
+    *,
+    proposals_path: Path,
+    existing_rules: list[str] | None = None,
+) -> dict:
+    """Write corpus proposals into the shared proposals file, replacing per-session drafts."""
     existing_rules = existing_rules or []
-    written = 0
+    written = []
     for cluster in store.clusters(include_noise=False):
-        note = _success_conflict(store, cluster.get("error_type") or cluster.get("label") or "", cluster.get("session_ids") or [])
-        proposal = recommend_cluster(cluster, complete_fn, existing_rules=existing_rules, success_note=note)
-        store.put_proposal(proposal)
-        written += 1
-    return {"proposals": written}
+        note = _success_conflict(
+            store,
+            cluster.get("error_type") or cluster.get("label") or "",
+            cluster.get("session_ids") or [],
+        )
+        written.append(
+            recommend_cluster(cluster, complete_fn, existing_rules=existing_rules, success_note=note)
+        )
+    upsert_proposals(proposals_path, written, mode="corpus", drop_modes={"per-session"})
+    return {"proposals": len(written)}

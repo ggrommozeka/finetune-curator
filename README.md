@@ -295,7 +295,9 @@ Annotation is one JSON object per session (task type, project, tools, outcome, w
 
 A pattern becomes a **rule** only when it spans at least three task types. Otherwise it becomes a **skill**: `.opencode/skills/<id>/SKILL.md` is the portable layout (YAML `name` and `description`, then steps and examples). Conflicts with existing rule text and with the same error type on successful sessions are stored on the proposal.
 
-The **Паттерны** page lists clusters by frequency and failure rate, filters by machine, project, and task type, shows example sessions, and approves, edits, or rejects each proposal as a rule or a skill.
+`recommend` writes into `data/rule_proposals.json`, the same file per-session `propose_rules` uses (`mode: per-session` drafts are replaced). Approve, edit, or reject them on the **Правила** page — there is no second approval screen. The **Паттерны** page only browses clusters (frequency, failure rate, machine, project, task type, example sessions) and jumps to that page. `--min-size 1` keeps single-session clusters for debugging.
+
+Export of approved rules and skills is `export_rules` (Markdown, JSON, and `--skills-dir`). `mine_patterns export` calls that same writer, then records the version used by `report` and `rollback`.
 
 ```bash
 python -m scripts.mine_patterns export \
