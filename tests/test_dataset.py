@@ -1,0 +1,335 @@
+"""Unified dataset: mix, splits, Qwen3 messages, and mocked evaluation."""
+
+import json
+from pathlib import Path
+
+from scripts.build_dataset import main as build_main
+from scripts.dataset.build import build_samples
+from scripts.dataset.tasks import from_gitlab_store
+from scripts.dataset.evaluate import review_metrics, style_metrics
+from scripts.dataset.format import render_qwen3, sequence_tokens
+from scripts.dataset.mix import is_held_out
+from scripts.gitlab.signals import SignalConfig
+from scripts.gitlab.store import GitlabStore
+
+DIFF = "@@ -1,3 +1,3 @@\n def helper():\n-old_name\n+parse_config\n"
+
+
+def _session(sid: str, messages: list[dict], **extra) -> dict:
+    return {"id": sid, "score": 0.9, "machine": "laptop-a", "messages": messages, **extra}
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _gitlab(tmp_path: Path) -> GitlabStore:
+    store = GitlabStore(tmp_path / "gitlab")
+    store.save_bundle(
+        {
+            "project_id": 9,
+            "iid": 3,
+            "title": "Parser",
+            "description": "",
+            "author": {"username": "ada", "name": "Ada Author"},
+        },
+        [
+            {
+                "id": "d1",
+                "notes": [
+                    {
+                        "id": 5,
+                        "body": "Rename the helper to parse_config.",
+                        "system": False,
+                        "author": {"username": "rita", "name": "Rita"},
+                        "created_at": "2024-06-01T01:00:00Z",
+                        "position": {"new_path": "app.py", "new_line": 2},
+                    }
+                ],
+            },
+            {
+                "id": "d2",
+                "notes": [
+                    {
+                        "id": 6,
+                        "body": "Please add a test.",
+                        "system": False,
+                        "author": {"username": "omar", "name": "Omar"},
+                        "created_at": "2024-06-01T01:10:00Z",
+                    }
+                ],
+            }
+        ],
+        [
+            {
+                "id": "abc123",
+                "title": "MRR: rename helper",
+                "message": "MRR: rename helper",
+                "created_at": "2024-06-01T02:00:00Z",
+                "author_email": "lead@company.com",
+                "author_name": "Lead",
+            },
+            {
+                "id": "quiet1",
+                "title": "add logging",
+                "message": "add logging",
+                "created_at": "2024-06-01T03:00:00Z",
+                "author_email": "lead@company.com",
+                "author_name": "Lead",
+            },
+        ],
+        {
+            "abc123": [{"old_path": "app.py", "new_path": "app.py", "diff": DIFF}],
+            "quiet1": [
+                {
+                    "old_path": "log.py",
+                    "new_path": "log.py",
+                    "diff": "@@ -1,1 +1,2 @@\n import sys\n+import logging\n",
+                }
+            ],
+        },
+        [],
+        project_path="group/app",
+    )
+    return store
+
+
+def test_agentic_tools_corrections_and_qwen_template(tmp_path: Path):
+    path = tmp_path / "sessions.jsonl"
+    _write_jsonl(
+        path,
+        [
+            _session(
+                "s1",
+                [
+                    {"role": "user", "content": "rename the helper"},
+                    {
+                        "role": "assistant",
+                        "content": "I will edit it.",
+                        "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "ls"}}],
+                    },
+                    {"role": "tool", "tool_call_id": "c1", "content": "app.py"},
+                    {"role": "assistant", "content": "Renamed."},
+                ],
+            ),
+            _session(
+                "s2",
+                [
+                    {"role": "user", "content": "fix the bug"},
+                    {"role": "assistant", "content": "done, but wrong"},
+                    {"role": "user", "content": "No, read the traceback first."},
+                    {"role": "assistant", "content": "Read the traceback, then fixed it."},
+                ],
+            ),
+            _session(
+                "s1-dup",
+                [
+                    {"role": "user", "content": "rename the helper"},
+                    {
+                        "role": "assistant",
+                        "content": "I will edit it.",
+                        "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "ls"}}],
+                    },
+                    {"role": "tool", "tool_call_id": "c1", "content": "app.py"},
+                    {"role": "assistant", "content": "Renamed."},
+                ],
+            ),
+        ],
+    )
+    decisions = tmp_path / "decisions.json"
+    decisions.write_text(json.dumps({"labels": {"s1": "keep", "s2": "keep"}}), encoding="utf-8")
+    result = build_samples(
+        opencode_path=path,
+        decisions_path=decisions,
+        ratios={"agentic": 1, "style": 0, "review": 0},
+        eval_ratio=0,
+        max_tokens=32_000,
+    )
+    kinds = {sample.kind for sample in result["train"]}
+    assert "trajectory" in kinds
+    assert "correction" in kinds
+    dpo = next(sample for sample in result["train"] if sample.dpo)
+    assert dpo.dpo["rejected"][0]["content"] == "done, but wrong"
+    assert "traceback" in dpo.dpo["chosen"][0]["content"]
+    trajectory = next(sample for sample in result["train"] if sample.id == "agentic-s1")
+    call = trajectory.messages[2]["tool_calls"][0]
+    assert call["type"] == "function"
+    assert call["function"]["name"] == "bash"
+    rendered = render_qwen3(trajectory.messages)
+    assert rendered.startswith("<|im_start|>system\n")
+    assert "<|im_end|>" in rendered
+    assert "<tool_call>" in rendered
+    assert "<function=bash>" in rendered
+    trajectories = [sample for sample in result["train"] if sample.kind == "trajectory"]
+    assert len(trajectories) == 1
+
+
+def test_gitlab_style_review_and_held_out_groups(tmp_path: Path):
+    store = _gitlab(tmp_path)
+    store.close()
+    sessions = tmp_path / "sessions.jsonl"
+    _write_jsonl(
+        sessions,
+        [
+            _session("keep-me", [{"role": "user", "content": "ship it"}, {"role": "assistant", "content": "shipped"}]),
+        ],
+    )
+    decisions = tmp_path / "decisions.json"
+    decisions.write_text(json.dumps({"labels": {"keep-me": "keep"}}), encoding="utf-8")
+    config = SignalConfig(team_leads=("lead@company.com",), mrr_pattern=r"\bmrr\b")
+    result = build_samples(
+        opencode_path=sessions,
+        decisions_path=decisions,
+        gitlab_root=tmp_path / "gitlab",
+        ratios={"agentic": 0.34, "style": 0.33, "review": 0.33},
+        eval_ratio=0,
+        signal_config=config,
+        max_tokens=32_000,
+    )
+    tasks = {sample.task for sample in result["train"]}
+    assert tasks == {"agentic", "style", "review"}
+    gitlab_samples = from_gitlab_store(tmp_path / "gitlab", config)
+    reviewers = {sample.extra.get("reviewer") for sample in gitlab_samples if sample.kind == "review"}
+    assert "rita" in reviewers
+    assert "omar" in reviewers
+    assert any(sample.kind == "review-negative" for sample in gitlab_samples)
+    assert any(sample.kind == "polish" for sample in gitlab_samples)
+    assert any(sample.dpo and sample.task == "style" for sample in gitlab_samples)
+    groups = {}
+    both = build_samples(
+        opencode_path=sessions,
+        decisions_path=decisions,
+        gitlab_root=tmp_path / "gitlab",
+        ratios={"agentic": 1, "style": 1, "review": 1},
+        eval_ratio=0.5,
+        signal_config=config,
+    )
+    for sample in both["train"] + both["eval"]:
+        groups.setdefault(sample.group, set()).add("eval" if sample in both["eval"] else "train")
+    assert all(len(splits) == 1 for splits in groups.values())
+    assert is_held_out("session:keep-me", 0) is False
+    assert is_held_out("session:keep-me", 1) is True
+
+
+def test_length_limit_dedup_anonymize_and_manifest(tmp_path: Path):
+    long_user = "x" * 500
+    path = tmp_path / "sessions.jsonl"
+    _write_jsonl(
+        path,
+        [
+            _session(
+                "long",
+                [
+                    {"role": "user", "content": long_user},
+                    {"role": "assistant", "content": "a" * 500},
+                    {"role": "user", "content": long_user},
+                    {"role": "assistant", "content": "b" * 500},
+                ],
+            )
+        ],
+    )
+    decisions = tmp_path / "decisions.json"
+    decisions.write_text(json.dumps({"labels": {"long": "keep"}}), encoding="utf-8")
+    result = build_samples(
+        opencode_path=path,
+        decisions_path=decisions,
+        ratios={"agentic": 1, "style": 0, "review": 0},
+        eval_ratio=0,
+        max_tokens=80,
+        anonymize=True,
+        anonymize_urls=True,
+    )
+    assert result["train"]
+    for sample in result["train"]:
+        assert sequence_tokens(sample.messages, 3.0) <= 80
+    assert len(result["train"]) >= 2
+    emailed = tmp_path / "mail.jsonl"
+    _write_jsonl(
+        emailed,
+        [
+            _session(
+                "mail",
+                [
+                    {"role": "user", "content": "write ada@company.com"},
+                    {"role": "assistant", "content": "see https://gitlab.example.com/a"},
+                ],
+            )
+        ],
+    )
+    hidden = build_samples(
+        opencode_path=emailed,
+        decisions_path=decisions,
+        ratios={"agentic": 1, "style": 0, "review": 0},
+        eval_ratio=0,
+        anonymize=True,
+        anonymize_urls=True,
+    )
+    blob = json.dumps([sample.as_sft() for sample in hidden["train"]])
+    assert "ada@company.com" not in blob
+    assert "https://" not in blob
+    assert result["manifest"]["chat_template"] == "qwen3"
+    assert "by_task" in result["manifest"]["train"]
+    assert "by_machine" in result["manifest"]["train"]
+
+
+def test_eval_and_cli(tmp_path: Path):
+    rows = [
+        {
+            "task": "review",
+            "kind": "review",
+            "messages": [
+                {"role": "system", "content": "review"},
+                {"role": "user", "content": "diff of app.py"},
+                {"role": "assistant", "content": "app.py:2: Rename the helper to parse_config."},
+            ],
+        },
+        {
+            "task": "style",
+            "kind": "polish",
+            "messages": [
+                {"role": "user", "content": "rewrite"},
+                {"role": "assistant", "content": "def parse_config():\n    return 1\n"},
+            ],
+        },
+    ]
+
+    def complete(messages):
+        user = messages[-1]["content"]
+        if "diff" in user:
+            return "app.py:2: Rename the helper to parse_config."
+        return "def parse_config():\n    return 1\n"
+
+    def judge(messages):
+        return '{"matched": true, "spurious": 0, "score": 0.9}'
+
+    review = review_metrics(rows, complete, judge)
+    assert review["recall"] == 1.0
+    assert review["precision"] == 1.0
+    style = style_metrics(rows, complete, judge)
+    assert style["mean_similarity"] == 0.9
+
+    sessions = tmp_path / "sessions.jsonl"
+    _write_jsonl(sessions, [_session("s", [{"role": "user", "content": "go"}, {"role": "assistant", "content": "went"}])])
+    out = tmp_path / "finetune"
+    build_main(
+        [
+            "--input",
+            str(sessions),
+            "--decisions",
+            str(tmp_path / "missing.json"),
+            "--gitlab-store",
+            str(tmp_path / "no-gitlab"),
+            "--patterns-store",
+            str(tmp_path / "no-patterns"),
+            "--output-dir",
+            str(out),
+            "--eval-ratio",
+            "0",
+            "--min-score",
+            "0.5",
+        ]
+    )
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["train"]["by_task"]["agentic"] == 1
+    assert (out / "train.jsonl").read_text(encoding="utf-8").strip()
+    assert manifest["chat_template"] == "qwen3"

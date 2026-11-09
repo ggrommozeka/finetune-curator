@@ -312,6 +312,88 @@ Export records the file versions and the adoption time. The report compares sess
 
 `annotate` and `recommend` accept `--mock-response` for a canned JSON reply. The default live endpoint is the same llama-server client as rule proposal (`http://localhost:8080/v1`, thinking off, low temperature).
 
+## One fine-tuning dataset
+
+`build_dataset` reads the OpenCode JSONL and the local GitLab store and writes one Unsloth chat dataset. Three tasks share that file:
+
+- **Agentic.** Approved sessions (`keep`) and unlabeled sessions at or above `--min-score` become multi-turn tool-calling conversations. A later user message is treated as a correction: the training trajectory drops the rejected step, and a DPO pair stores that step as `rejected` and the following assistant step as `chosen`.
+- **Style.** Team-lead commits (MRR titles and the lead's other commits) and comment-then-fix pairs become "rewrite this code following project conventions" samples. The code before the edit is the DPO `rejected` completion; the code after is `chosen`.
+- **Review.** A diff hunk is the input and the review comment, from every reviewer, is the output, with a suggested fix when the comment was linked to one. Hunks nobody commented on are negatives whose target is `No issues.`
+
+`--agentic`, `--style`, and `--review` are mixing weights. Held-out rows are chosen by session id or MR id, so one session or MR never appears in both `train.jsonl` and `eval.jsonl`. Long conversations are split on turn boundaries under `--max-tokens` (default 32000). `--anonymize` strips emails and URLs. `manifest.json` counts rows by task, source, and machine. Messages are the OpenAI tool-calling schema Qwen3's chat template consumes (`<|im_start|>` / `<|im_end|>` and `<tool_call>` blocks).
+
+```bash
+python -m scripts.build_dataset \
+  --input data/raw_scored.jsonl \
+  --decisions data/decisions.json \
+  --gitlab-store data/gitlab \
+  --patterns-store data/patterns \
+  --output-dir data/finetune \
+  --agentic 0.5 --style 0.25 --review 0.25 \
+  --max-tokens 32000 \
+  --eval-ratio 0.1
+
+python -m scripts.eval_dataset --eval data/finetune/eval.jsonl --mock-response "No issues."
+```
+
+The same button is on the **Экспорт** page of `streamlit run viewer/app.py`.
+
+Train a Qwen3 LoRA with Unsloth. The tokenizer's `qwen3` template matches the JSONL:
+
+```python
+from datasets import load_dataset
+from trl import SFTConfig, SFTTrainer
+from unsloth import FastLanguageModel
+from unsloth.chat_templates import get_chat_template
+
+model, tokenizer = FastLanguageModel.from_pretrained(
+    "unsloth/Qwen3-8B",
+    max_seq_length=32768,
+    load_in_4bit=True,
+)
+tokenizer = get_chat_template(tokenizer, chat_template="qwen3")
+model = FastLanguageModel.get_peft_model(
+    model,
+    r=16,
+    lora_alpha=16,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+)
+dataset = load_dataset("json", data_files={"train": "data/finetune/train.jsonl"})
+
+def formatting(batch):
+    texts = [
+        tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+        for messages in batch["messages"]
+    ]
+    return {"text": texts}
+
+trainer = SFTTrainer(
+    model=model,
+    processing_class=tokenizer,
+    train_dataset=dataset["train"].map(formatting, batched=True),
+    args=SFTConfig(
+        dataset_text_field="text",
+        max_length=32768,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=4,
+        num_train_epochs=1,
+        output_dir="outputs/qwen3-lora",
+    ),
+)
+trainer.train()
+model.save_pretrained_gguf("outputs/gguf", tokenizer, quantization_method="q5_k_m")
+```
+
+DPO uses `train_dpo.jsonl` (`prompt`, `chosen`, and `rejected` are message lists) with TRL's `DPOTrainer` and the same Qwen3 template.
+
+Serve the GGUF with llama.cpp. `--jinja` turns on the chat template stored in the file:
+
+```bash
+llama-server -m outputs/gguf/model.gguf --jinja -c 32768 --host 127.0.0.1 --port 8080
+```
+
+Score the held-out file against a live server with `python -m scripts.eval_dataset --eval data/finetune/eval.jsonl`. Add `--judge` to let that server decide whether a predicted review matches the real comment. Without `--judge`, review matches are lexical and style similarity is a text ratio.
+
 ## Layout
 
 ```

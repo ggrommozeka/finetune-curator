@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.build_dataset import main as build_finetune
 from scripts.export_approved import main as export_sessions
 from scripts.export_gitlab_mrr import main as export_gitlab
 from scripts.export_rules import main as export_rules
@@ -72,6 +73,46 @@ def render() -> None:
             st.error(str(exc) or "export failed")
         else:
             st.success(f"{gitlab_sft} · {gitlab_dpo}")
+    st.markdown("#### Единый датасет")
+    st.caption("Agentic, style, and review samples in one Unsloth chat JSONL, plus a held-out split.")
+    output_dir = st.text_input("Output dir", value="data/finetune")
+    agentic = st.slider("Доля agentic", 0.0, 1.0, 0.5, 0.05)
+    style = st.slider("Доля style", 0.0, 1.0, 0.25, 0.05)
+    review = st.slider("Доля review", 0.0, 1.0, 0.25, 0.05)
+    max_tokens = st.number_input("Макс. токенов", min_value=256, value=32000, step=256)
+    eval_ratio = st.slider("Held-out", 0.0, 0.5, 0.1, 0.05)
+    anonymize = st.checkbox("Анонимизировать датасет", value=False)
+    if st.button("Собрать единый датасет"):
+        argv = [
+            "--input",
+            input_path,
+            "--decisions",
+            decisions,
+            "--gitlab-store",
+            gitlab_store,
+            "--patterns-store",
+            st.session_state.get("cfg_patterns", "data/patterns"),
+            "--output-dir",
+            output_dir,
+            "--agentic",
+            str(agentic),
+            "--style",
+            str(style),
+            "--review",
+            str(review),
+            "--max-tokens",
+            str(int(max_tokens)),
+            "--eval-ratio",
+            str(eval_ratio),
+        ]
+        if anonymize:
+            argv.append("--anonymize")
+        try:
+            build_finetune(argv)
+        except SystemExit as exc:
+            st.error(str(exc) or "build failed")
+        else:
+            st.success(output_dir)
 
 
 render()
