@@ -20,7 +20,7 @@ from scripts.rules.sessions import (  # noqa: E402
     session_id,
 )
 from scripts.rules.store import (  # noqa: E402
-    effective_rules,
+    effective_proposals,
     load_proposals,
     load_rule_decisions,
     save_rule_decisions,
@@ -103,7 +103,7 @@ def render_rules_page(cli) -> None:
     review = load_review_decisions(Path(decisions_path))
     notes = review.get("notes") or {}
     by_id = {session_id(rec): rec for rec in rows}
-    rules = effective_rules(document, rule_decisions)
+    rules = effective_proposals(document, rule_decisions)
 
     with st.sidebar:
         st.markdown("---")
@@ -202,7 +202,11 @@ python -m scripts.export_rules \\
             """,
             unsafe_allow_html=True,
         )
-        text = st.text_area("Текст правила", key=text_key, height=90)
+        kind_key = f"rule_kind_{rid}"
+        if kind_key not in st.session_state:
+            st.session_state[kind_key] = rule.get("kind") or "rule"
+        kind = st.selectbox("Тип", ["rule", "skill"], key=kind_key)
+        text = st.text_area("Текст", key=text_key, height=90)
         category = st.selectbox("Категория", options, key=cat_key)
         st.markdown("**Почему**")
         st.text(rule["rationale"] or "—")
@@ -234,30 +238,30 @@ python -m scripts.export_rules \\
             if not str(text).strip():
                 st.warning("Пустой текст правила.")
             else:
-                _store_status(rule_decisions, rule_decisions_p, rid, "approved", text, category)
+                _store_status(rule_decisions, rule_decisions_p, rid, "approved", text, category, kind)
                 st.rerun()
         if b2.button("❌ Отклонить", key=f"reject_{rid}", use_container_width=True):
-            _store_status(rule_decisions, rule_decisions_p, rid, "rejected", text, category)
+            _store_status(rule_decisions, rule_decisions_p, rid, "rejected", text, category, kind)
             st.rerun()
         if b3.button("Сбросить", key=f"clear_{rid}", use_container_width=True):
             rule_decisions.setdefault("statuses", {}).pop(rid, None)
-            _store_edit(rule_decisions, rid, text, category)
+            _store_edit(rule_decisions, rid, text, category, kind)
             save_rule_decisions(rule_decisions_p, rule_decisions)
             st.session_state.rule_decisions = rule_decisions
             st.rerun()
         st.markdown("---")
 
 
-def _store_edit(decisions: dict, rid: str, text: str, category: str) -> None:
-    edit = {"category": category}
+def _store_edit(decisions: dict, rid: str, text: str, category: str, kind: str) -> None:
+    edit = {"category": category, "kind": kind if kind in {"rule", "skill"} else "rule"}
     cleaned = str(text).strip()
     if cleaned:
         edit["text"] = cleaned
     decisions.setdefault("edits", {})[rid] = edit
 
 
-def _store_status(decisions: dict, path: Path, rid: str, status: str, text: str, category: str) -> None:
+def _store_status(decisions: dict, path: Path, rid: str, status: str, text: str, category: str, kind: str) -> None:
     decisions.setdefault("statuses", {})[rid] = status
-    _store_edit(decisions, rid, text, category)
+    _store_edit(decisions, rid, text, category, kind)
     save_rule_decisions(path, decisions)
     st.session_state.rule_decisions = decisions

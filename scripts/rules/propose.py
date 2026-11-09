@@ -54,14 +54,17 @@ def propose_rules(
             errors.append(f"batch {index}/{len(transcripts)}: {exc}")
 
     merged = merge_rules(collected, threshold=merge_threshold)
+    proposals = [{**rule, "kind": "rule"} for rule in merged]
     document = {
-        "version": 1,
+        "version": 2,
+        "mode": "per-session",
         "model": model,
         "base_url": base_url,
         "context_budget": context_budget,
         "source_session_ids": source_ids,
         "batches": len(transcripts),
-        "rules": merged,
+        "proposals": proposals,
+        "rules": proposals,
     }
     if errors:
         document["errors"] = errors
