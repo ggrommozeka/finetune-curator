@@ -1,4 +1,6 @@
 streamlit>=1.28
 datasets>=2.14
+openai>=1.40
+pytest>=8.0
 # LogMiner: install from git (see README)
 # pip install "git+https://github.com/pearsonkyle/LogMiner.git"
