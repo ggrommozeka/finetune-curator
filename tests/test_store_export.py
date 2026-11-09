@@ -101,6 +101,7 @@ def test_export_formats(tmp_path: Path):
         "rationale": "it looped",
         "session_ids": ["s1", "s2"],
         "evidence": "EVIDENCE_LOOP",
+        "source": "opencode",
     }
     assert render_markdown([]).startswith("# Agent harness rules\n")
 

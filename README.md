@@ -9,7 +9,7 @@ Works with OpenCode (and other LogMiner sources: Claude Code, Cline, Codex, Qwen
 ## What you get
 
 1. **Export** — thin wrapper around [LogMiner](https://github.com/pearsonkyle/LogMiner) for OpenCode history
-2. **Viewer** — Streamlit UI with **Keep / Discard**, score filters, trajectory browser, and a **Правила** page for proposed harness rules
+2. **One Streamlit app** — `streamlit run viewer/app.py`. Shared navigation and paths: OpenCode sessions, GitLab MRs, proposals, and export.
 3. **Export approved** — writes only kept sessions to a clean JSONL ready for Unsloth
 4. **Proposals** — one shared list (`kind`: rule or skill, text, source session ids, status). Per-session generation and GitLab review comments write that same file, and the same viewer page approves them.
 5. **GitLab reviews** — merged MRs become SFT and DPO examples, and linked review comments can be proposed as rules through the shared proposal file.
@@ -291,7 +291,7 @@ finetune-curator/
 │   ├── rules/                # selection, merge, endpoint, export
 │   └── gitlab/               # client, store, sync, linking, anonymize
 ├── viewer/
-│   ├── app.py                # Streamlit keep/discard + rules + GitLab
+│   ├── app.py                # one Streamlit app: sessions, GitLab, proposals, export
 │   ├── rules_page.py
 │   ├── gitlab_page.py        # stored MRs, offline process, example review
 │   └── gitlab_panel.py       # before/after review card
