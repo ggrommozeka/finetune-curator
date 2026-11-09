@@ -9,7 +9,7 @@ Works with OpenCode (and other LogMiner sources: Claude Code, Cline, Codex, Qwen
 ## What you get
 
 1. **Export** — thin wrapper around [LogMiner](https://github.com/pearsonkyle/LogMiner) for OpenCode history
-2. **Viewer** — Streamlit UI with **Keep / Discard**, score filters, trajectory browser, and a **Правила** page for proposed harness rules
+2. **One Streamlit app** — `streamlit run viewer/app.py`. Pages share navigation and paths: OpenCode sessions, proposals (rules and skills), and export. GitLab and monitoring pages plug into the same app.
 3. **Export approved** — writes only kept sessions to a clean JSONL ready for Unsloth
 4. **Proposals** — one shared list (`kind`: rule or skill, text, source session ids, status). A first version proposes rules from individual sessions. Later corpus mining writes the same file, and the same viewer page approves both.
 

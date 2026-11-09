@@ -43,7 +43,8 @@ def normalize_proposal(item: dict) -> dict:
         "evidence": str(item.get("evidence") or "").strip(),
         "steps": [str(step) for step in steps if str(step).strip()],
         "examples": [str(example) for example in examples if str(example).strip()],
-        "conflicts": [str(item) for item in (item.get("conflicts") or [])],
+        "conflicts": [str(conflict) for conflict in (item.get("conflicts") or [])],
+        "source": str(item.get("source") or "opencode"),
     }
 
 
@@ -169,6 +170,7 @@ def public_rule(rule: dict) -> dict:
         "rationale": rule.get("rationale") or "",
         "session_ids": list(rule.get("session_ids") or []),
         "evidence": rule.get("evidence") or "",
+        "source": rule.get("source") or "opencode",
     }
 
 
