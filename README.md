@@ -4,14 +4,15 @@ Pipeline: **LogMiner export → visual review (keep/discard) → export only app
 
 The same review pass can mine a second artifact: **harness rules** for the agent system prompt or `AGENTS.md` (mistakes, user corrections, loops, tool misuse).
 
-Works with OpenCode (and other LogMiner sources: Claude Code, Cline, Codex, Qwen).
+Works with OpenCode (and other LogMiner sources: Claude Code, Cline, Codex, Qwen) and with merged GitLab merge requests.
 
 ## What you get
 
 1. **Export** — thin wrapper around [LogMiner](https://github.com/pearsonkyle/LogMiner) for OpenCode history
 2. **Viewer** — Streamlit UI with **Keep / Discard**, score filters, trajectory browser, and a **Правила** page for proposed harness rules
 3. **Export approved** — writes only kept sessions to a clean JSONL ready for Unsloth
-4. **Harness rules** — an OpenAI-compatible model proposes rules from discarded sessions, low scores, and reviewer notes; you approve them; export Markdown + JSON
+4. **Harness rules** — an OpenAI-compatible model proposes rules from discarded sessions, low scores, reviewer notes, and GitLab review comments; you approve them; export Markdown + JSON
+5. **GitLab reviews** — merged MRs become SFT and DPO examples from team-lead comments and the `MRR fixes` commits that followed them
 
 The dataset flow is unchanged. Rule files are a separate output.
 
@@ -185,6 +186,81 @@ export FINETUNE_CURATOR_MODEL=qwen3-27b-q5
 
 `--print-endpoint` shows the resolved model and base URL and never prints the key.
 
+## GitLab merge-request reviews
+
+Company review history can feed the same curator. This talks to a self-hosted GitLab: merged merge requests, review discussions (including inline diff notes), and follow-up commits whose message matches `MRR fixes` (case-insensitive; change it with `--fix-pattern`).
+
+Each review comment is linked to the fix that addressed it:
+
+1. same file and overlapping lines, comment timestamp before the commit (confidence 0.9)
+2. same file, lines do not overlap (confidence 0.55)
+3. otherwise the earliest later `MRR fixes` commit on the MR (confidence 0.3)
+
+Nothing is committed. The token comes from `GITLAB_TOKEN` and is not printed. API responses can be cached under `data/gitlab_cache/` (gitignored). Pass `--anonymize` to strip author names and emails, and `--anonymize-urls` to replace `http(s)` URLs as well. `--ca-bundle` trusts a private CA; `--insecure` turns verification off.
+
+```bash
+export GITLAB_TOKEN=...   # personal access token, api scope. Do not commit it.
+python -m scripts.export_gitlab_mrr \
+  --base-url https://gitlab.company.internal \
+  --ca-bundle /path/to/company-ca.pem \
+  --group my-group \
+  --since 2025-01-01 \
+  --until 2026-01-01 \
+  --reviewer team.lead \
+  --anonymize \
+  --anonymize-urls \
+  --sft data/gitlab_sft.jsonl \
+  --dpo data/gitlab_dpo.jsonl
+```
+
+`--project group/app` (repeatable) limits the export to specific projects. `--group` reads merged MRs from that group.
+
+`data/gitlab_sft.jsonl` is the same messages JSONL as the OpenCode export, so the viewer keep/discard flow and `export_approved` work unchanged. Open a row to see the comment plus the before/after code. The sidebar filter **Только GitLab review** hides other sessions.
+
+```bash
+streamlit run viewer/app.py -- --input data/gitlab_sft.jsonl
+
+python -m scripts.export_approved \
+  --input data/gitlab_sft.jsonl \
+  --decisions data/decisions.json \
+  --output data/gitlab_approved.jsonl
+```
+
+The SFT user turn is the MR title, description, review comment, and the code before the fix. The assistant turn is the updated code. The DPO file uses Unsloth's `prompt` / `chosen` / `rejected` columns (`rejected` is the code before, `chosen` is the fix, `prompt` includes the comment). Rebuild DPO from an already reviewed SFT file without calling GitLab:
+
+```bash
+python -m scripts.export_gitlab_mrr \
+  --dpo-from data/gitlab_approved.jsonl \
+  --dpo data/gitlab_dpo.jsonl
+```
+
+Load the DPO file with `datasets.load_dataset("json", data_files="data/gitlab_dpo.jsonl", split="train")`.
+
+Those review examples are also a rules source. Point `propose_rules` at the GitLab JSONL and add `gitlab_review` (it is not included in the default sources):
+
+```bash
+python -m scripts.propose_rules \
+  --input data/gitlab_sft.jsonl \
+  --sources gitlab_review \
+  --output data/rule_proposals.json \
+  --base-url http://127.0.0.1:8080/v1
+```
+
+Approve the proposed rules on the **Правила** page the same way as session-derived rules.
+
+Smoke-test the exporter without a network or a token leak, using the recorded fixture:
+
+```bash
+GITLAB_TOKEN=example python -m scripts.export_gitlab_mrr \
+  --base-url https://gitlab.example.com \
+  --project group/app \
+  --reviewer teamlead \
+  --fixture tests/fixtures/gitlab_api.json \
+  --no-cache \
+  --sft /tmp/gitlab_sft.jsonl \
+  --dpo /tmp/gitlab_dpo.jsonl
+```
+
 ## Layout
 
 ```
@@ -197,10 +273,13 @@ finetune-curator/
 │   ├── export_approved.py    # Keep-only JSONL export
 │   ├── propose_rules.py      # LLM rule proposals
 │   ├── export_rules.py       # Approved rules → Markdown + JSON
-│   └── rules/                # selection, merge, endpoint, export
+│   ├── export_gitlab_mrr.py  # GitLab MR review → SFT + DPO
+│   ├── rules/                # selection, merge, endpoint, export
+│   └── gitlab/               # GitLab client, linking, anonymize
 ├── viewer/
 │   ├── app.py                # Streamlit keep/discard + rules review
-│   └── rules_page.py
+│   ├── rules_page.py
+│   └── gitlab_panel.py       # before/after review card
 ├── tests/
 └── data/                     # local only (gitignored)
 ```
@@ -211,7 +290,7 @@ finetune-curator/
 python -m pytest
 ```
 
-The suite covers merge, JSON parsing (thinking tags included), chunking and batching, decision files, both export formats, OpenCode config resolution, and a mocked end-to-end `propose_rules` → `export_rules` run. It does not call a live model.
+The suite covers merge, JSON parsing (thinking tags included), chunking and batching, decision files, both export formats, OpenCode config resolution, a mocked end-to-end `propose_rules` → `export_rules` run, and the GitLab exporter against a recorded API fixture. It does not call a live model or a live GitLab.
 
 ## Notes
 

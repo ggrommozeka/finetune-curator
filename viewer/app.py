@@ -332,6 +332,7 @@ def _render_sessions(cli) -> None:
             st.session_state.min_score = 0.0
             st.session_state.status_filter = ["undecided", "keep", "discard"]
             st.session_state.only_tools = False
+            st.session_state.only_gitlab = False
             st.session_state.query = ""
             st.session_state.label_filter = sorted({str(r.get("label", "unknown")) for r in rows})
         min_score = st.slider(
@@ -361,6 +362,11 @@ def _render_sessions(cli) -> None:
             key="only_tools",
             **_widget_value("only_tools", False),
         )
+        only_gitlab = st.checkbox(
+            "Только GitLab review",
+            key="only_gitlab",
+            **_widget_value("only_gitlab", False),
+        )
         query = st.text_input(
             "Поиск в user-тексте",
             key="query",
@@ -372,7 +378,8 @@ def _render_sessions(cli) -> None:
 
         filtered: list[dict] = []
         for r in rows:
-            if float(r.get("score") or 0) < min_score:
+            raw_score = r.get("score")
+            if raw_score is not None and raw_score != "" and float(raw_score) < min_score:
                 continue
             if str(r.get("label", "unknown")) not in label_filter:
                 continue
@@ -383,6 +390,8 @@ def _render_sessions(cli) -> None:
                 has_tools = any(m.get("tool_calls") for m in msgs if m.get("role") == "assistant")
                 if not has_tools:
                     continue
+            if only_gitlab and not (r.get("source") == "gitlab_review" or r.get("gitlab")):
+                continue
             if query:
                 preview = first_user_preview(msgs, 500).lower()
                 if query.lower() not in preview:
@@ -500,9 +509,17 @@ python -m scripts.export_approved \\
             _queue_session_pos(idx + 1)
             st.rerun()
 
-    st.markdown("#### Диалог")
-    for i, m in enumerate(msgs):
-        render_message(i + 1, m)
+    if rec.get("gitlab"):
+        from gitlab_panel import render_gitlab_panel
+
+        render_gitlab_panel(rec)
+        with st.expander("SFT messages"):
+            for i, m in enumerate(msgs):
+                render_message(i + 1, m)
+    else:
+        st.markdown("#### Диалог")
+        for i, m in enumerate(msgs):
+            render_message(i + 1, m)
 
     note_val = st.text_area(
         "Заметка к сессии (сохраняется в decisions)",

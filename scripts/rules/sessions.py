@@ -132,6 +132,7 @@ def select_sessions(
     - discarded: reviewer marked the session discard
     - low-score: score <= max_score, or LogMiner label bad/maybe
     - notes: reviewer left a note (including on kept sessions)
+    - gitlab_review: exported GitLab MR review examples (source gitlab_review)
     """
     decisions = decisions or {}
     labels = {str(k): str(v).lower() for k, v in (decisions.get("labels") or {}).items()}
@@ -157,12 +158,15 @@ def select_sessions(
             take = True
         if "notes" in wanted and note:
             take = True
+        is_gitlab = rec.get("source") == "gitlab_review" or bool(rec.get("gitlab"))
+        if "gitlab_review" in wanted and is_gitlab:
+            take = True
         if not take:
             continue
         seen.add(sid)
         if decision == "discard":
             rank = 0
-        elif note:
+        elif note or (is_gitlab and "gitlab_review" in wanted):
             rank = 1
         else:
             rank = 2
@@ -195,6 +199,13 @@ def render_session(rec: dict, decision: str | None, note: str | None) -> tuple[s
     tools = rec.get("tools_used") or []
     if tools:
         lines.append("tools_used: " + ", ".join(str(item) for item in tools))
+    gitlab = rec.get("gitlab") if isinstance(rec.get("gitlab"), dict) else {}
+    if gitlab.get("comment"):
+        lines.append("review_comment: " + str(gitlab["comment"]).strip())
+    if gitlab.get("file"):
+        lines.append("review_file: " + str(gitlab["file"]))
+    if gitlab.get("link"):
+        lines.append("review_link: " + str(gitlab["link"]))
     preamble = "\n".join(lines) + "\n"
 
     blocks: list[str] = []

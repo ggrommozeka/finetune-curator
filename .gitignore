@@ -8,6 +8,7 @@ data/*.jsonl
 data/decisions.json
 data/*.json
 data/*.md
+data/gitlab_cache/
 !data/.gitkeep
 .env
 *.egg-info/
