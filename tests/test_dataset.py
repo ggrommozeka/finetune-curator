@@ -419,6 +419,39 @@ def test_review_context_source_model_and_author_metrics():
         {"kind": "review-negative", "messages": [{"role": "user", "content": "diff"}, {"role": "assistant", "content": "No issues."}]}
     ]
     assert false_positive_rate(negatives, lambda _messages: "This leaks a secret.")["false_positive_rate"] == 1.0
+    from scripts.dataset.evaluate import compare_reviewers
+
+    shared = [
+        {
+            "task": "review",
+            "kind": "review",
+            "group": "mr:9!3",
+            "messages": [
+                {"role": "user", "content": "diff"},
+                {"role": "assistant", "content": "Rename the helper to parse_config."},
+            ],
+        },
+        {
+            "task": "review",
+            "kind": "review-negative",
+            "group": "mr:9!3",
+            "messages": [
+                {"role": "user", "content": "clean diff"},
+                {"role": "assistant", "content": "No issues."},
+            ],
+        },
+    ]
+    compared = compare_reviewers(
+        shared,
+        {
+            "qwen3.5-9b": lambda _messages: "Rename the helper to parse_config.",
+            "ornith-1.0-9b": lambda _messages: "No issues.",
+        },
+    )
+    assert compared["rows"] == 2
+    assert compared["models"]["qwen3.5-9b"]["recall"] == 1.0
+    assert compared["models"]["ornith-1.0-9b"]["recall"] == 0.0
+    assert compared["models"]["ornith-1.0-9b"]["false_positive_rate"] == 0.0
 
 
 def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Path):
@@ -448,7 +481,8 @@ def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Pat
     assert "<think>" not in blob
     assert "Renamed the helper." in blob
     assert stripped["manifest"]["thinking"] == "strip"
-    assert stripped["manifest"]["target_model"] == "qwen3-27b"
+    assert stripped["manifest"]["target_model"] == "qwen3.5-27b"
+    assert stripped["manifest"]["base_model"] == "Qwen/Qwen3.5-27B"
     assert stripped["manifest"]["tool_format"] == "qwen3"
     kept = build_samples(
         opencode_path=path,

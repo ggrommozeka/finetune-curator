@@ -79,7 +79,13 @@ def render() -> None:
         "review — отдельный датасет для модели ~9B."
     )
     dataset_task = st.selectbox("Задача", ["all", "author", "agentic", "style", "review"], key="finetune_task")
-    chat_template = st.selectbox("Chat template", ["qwen3", "chatml", "llama3", "gemma"], key="finetune_template")
+    chat_template = st.selectbox(
+        "Chat template",
+        ["qwen3", "qwen3.5", "chatml", "llama3", "gemma"],
+        key="finetune_template",
+    )
+    base_default = "Qwen/Qwen3.5-9B" if dataset_task == "review" else "Qwen/Qwen3.5-27B"
+    base_model = st.text_input("Base model", value=base_default, key=f"finetune_base_{dataset_task}")
     output_dir = st.text_input("Output dir", value=f"data/finetune/{dataset_task}", key=f"finetune_dir_{dataset_task}")
     token_default = 16384 if dataset_task == "review" else 32000
     max_tokens = st.number_input(
@@ -120,6 +126,8 @@ def render() -> None:
             dataset_task,
             "--chat-template",
             chat_template,
+            "--base-model",
+            base_model,
             "--max-tokens",
             str(int(max_tokens)),
             "--review-context-lines",

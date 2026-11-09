@@ -349,9 +349,11 @@ python -m scripts.build_dataset --task review --output-dir data/finetune/review 
 
 The same controls are on the **Экспорт** page of `streamlit run viewer/app.py`.
 
-### QLoRA for the 27B
+### bf16 LoRA for Qwen3.5
 
-Train agentic and style on the Qwen3 27B with Unsloth in 4-bit. The sequence length here is the training budget (32768), not the 200k context used later in llama.cpp. Point `from_pretrained` at the Unsloth 4-bit build of the same Qwen3 the GGUF was converted from.
+Unsloth's [Qwen3.5 fine-tuning guide](https://unsloth.ai/docs/models/qwen3.5/fine-tune) says not to train Qwen3.5 with QLoRA (4-bit), dense or MoE, because the quantization gap is larger than usual. Use bf16 LoRA instead. Their published training memory is about 22GB for the 9B and about 56GB for the 27B. There is no separate Qwen3.8 training page that recommends 4-bit, so the 27B author model uses this same bf16 LoRA setup. The guide's checkpoint id is `Qwen/Qwen3.5-27B`.
+
+The sequence length below is the training budget (32768 for the author, 16384 for the reviewer), not the long context used later in llama.cpp. Set `model_name` and `chat_template` to the pair recorded in `manifest.json` (`base_model` and `chat_template`). Reviewer candidates are `Qwen/Qwen3.5-9B` and `deepreinforce-ai/Ornith-1.0-9B` (MIT; the 9B dense model is a Qwen3.5 hybrid, and the Ornith family also includes Gemma 4 post-trains at larger sizes). Ornith's GGUF uses the Qwen3.5 chat template; pass `--chat-template gemma` only if you actually train a Gemma-based checkpoint.
 
 ```python
 from datasets import load_dataset
@@ -360,9 +362,11 @@ from unsloth import FastLanguageModel
 from unsloth.chat_templates import get_chat_template
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    "unsloth/Qwen3-27B",
+    model_name="Qwen/Qwen3.5-27B",
     max_seq_length=32768,
-    load_in_4bit=True,
+    load_in_4bit=False,
+    load_in_16bit=True,
+    full_finetuning=False,
 )
 tokenizer = get_chat_template(tokenizer, chat_template="qwen3")
 model = FastLanguageModel.get_peft_model(
@@ -394,11 +398,13 @@ trainer = SFTTrainer(
         gradient_accumulation_steps=8,
         num_train_epochs=1,
         learning_rate=2e-4,
-        output_dir="outputs/qwen3-27b-lora",
+        output_dir="outputs/qwen3.5-27b-lora",
     ),
 )
 trainer.train()
 ```
+
+For the 9B reviewer, use the same bf16 flags with `model_name="Qwen/Qwen3.5-9B"` or `model_name="deepreinforce-ai/Ornith-1.0-9B"` and `max_length=16384`. Do not set `load_in_4bit=True`.
 
 DPO uses `train_dpo.jsonl` (`prompt`, `chosen`, and `rejected` are message lists) with TRL's `DPOTrainer` and the same template. If the export was built with `--thinking keep`, do not disable thinking at serve time.
 
@@ -407,29 +413,45 @@ Two ways to serve the result with llama.cpp:
 Merged GGUF, produced by Unsloth in the same quant family as the Q5_K_XL already in use:
 
 ```python
-model.save_pretrained_gguf("outputs/qwen3-27b-gguf", tokenizer, quantization_method="q5_k_m")
+model.save_pretrained_gguf("outputs/qwen3.5-27b-gguf", tokenizer, quantization_method="q5_k_m")
 ```
 
 ```bash
-llama-server -m outputs/qwen3-27b-gguf/model.gguf --jinja -c 200000 --host 127.0.0.1 --port 8080
+llama-server -m outputs/qwen3.5-27b-gguf/model.gguf --jinja -c 200000 --host 127.0.0.1 --port 8080
 ```
 
-Or keep that base GGUF and attach the adapter. Save the LoRA, convert it with llama.cpp's `convert_lora_to_gguf.py`, and load it beside the base model:
+Or keep a base GGUF and attach the adapter. Save the LoRA, convert it with llama.cpp's `convert_lora_to_gguf.py`, and load it beside the base model:
 
 ```python
-model.save_pretrained("outputs/qwen3-27b-lora")
-tokenizer.save_pretrained("outputs/qwen3-27b-lora")
+model.save_pretrained("outputs/qwen3.5-27b-lora")
+tokenizer.save_pretrained("outputs/qwen3.5-27b-lora")
 ```
 
 ```bash
-python convert_lora_to_gguf.py outputs/qwen3-27b-lora --outfile adapter.gguf
-llama-server -m qwen3-27b-q5_k_xl.gguf --lora adapter.gguf --jinja -c 200000 \
+python convert_lora_to_gguf.py outputs/qwen3.5-27b-lora --outfile adapter.gguf
+llama-server -m qwen3.5-27b-q5_k_xl.gguf --lora adapter.gguf --jinja -c 200000 \
   --host 127.0.0.1 --port 8080
 ```
 
 `--jinja` applies the Qwen3 chat template stored in the GGUF, including tool calls. A dataset built with `--thinking strip` should be served with thinking disabled (`chat_template_kwargs.enable_thinking` false, or the server's equivalent). A dataset built with `--thinking keep` should leave thinking on.
 
-Score the held-out file with `python -m scripts.eval_dataset --eval data/finetune/eval.jsonl`. Model A reports the user-correction rate (completions closer to the uncorrected step than to the corrected one) and the review-comment rate on the code it wrote. Model B reports comment match precision/recall and the false-positive rate on hunks that passed review with no comments. Add `--judge` to let the server decide whether a predicted review matches the real comment.
+Score one server with `python -m scripts.eval_dataset --eval data/finetune/eval.jsonl`. To compare several base or fine-tuned checkpoints on the same held-out MR rows, pass a JSON file. Each entry is a llama-server (or any OpenAI-compatible server) or a canned reply for a dry run:
+
+```json
+[
+  {"name": "qwen3.5-9b", "base_url": "http://127.0.0.1:8080/v1", "model": "Qwen3.5-9B"},
+  {"name": "ornith-1.0-9b", "base_url": "http://127.0.0.1:8081/v1", "model": "Ornith-1.0-9B"},
+  {"name": "review-lora", "base_url": "http://127.0.0.1:8082/v1", "model": "review-lora"}
+]
+```
+
+```bash
+python -m scripts.eval_dataset \
+  --eval data/finetune/review/eval.jsonl \
+  --models data/finetune/review/models.json
+```
+
+Model A reports the user-correction rate (completions closer to the uncorrected step than to the corrected one) and the review-comment rate on the code it wrote. Model B, for every listed model, reports comment match precision/recall and the false-positive rate on hunks that passed review with no comments. Add `--judge` to let a server decide whether a predicted review matches the real comment.
 
 Approved rules and skills stay the harness next to Model A: export them with `export_rules` and put the rules in the system prompt or `.opencode/skills`. The review packer also inserts the approved rule text as a short conventions section when `data/rule_proposals.json` is present.
 

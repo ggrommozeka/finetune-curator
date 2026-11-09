@@ -16,6 +16,7 @@ from scripts.dataset.mix import (
     mix_ratios,
     prefer_source_models,
 )
+from scripts.dataset.targets import resolve_target
 from scripts.dataset.tasks import from_gitlab_store, from_opencode, load_machine_labels
 from scripts.gitlab.signals import SignalConfig, load_signal_config
 
@@ -41,13 +42,16 @@ def build_samples(
     signal_config: SignalConfig | None = None,
     seed: str = "finetune",
     tasks: set[str] | None = None,
-    chat_template: str = "qwen3",
+    chat_template: str | None = None,
+    base_model: str | None = None,
     review_context_lines: int | None = None,
     thinking: str = "strip",
     source_models: set[str] | None = None,
     model_weights: dict[str, float] | None = None,
     conventions: str = "",
 ) -> dict:
+    target = resolve_target(tasks, base_model, chat_template)
+    chat_template = target["chat_template"]
     if chat_template not in CHAT_TEMPLATES:
         raise ValueError(f"Unknown chat template {chat_template!r}")
     ratios = dict(ratios or DEFAULT_RATIOS)
@@ -93,9 +97,13 @@ def build_samples(
         "eval": held,
         "manifest": {
             "chat_template": chat_template,
-            "tool_format": "qwen3" if chat_template == "qwen3" else chat_template,
+            "tool_format": "qwen3" if chat_template in {"qwen3", "qwen3.5"} else chat_template,
             "thinking": thinking,
-            "target_model": "qwen3-9b" if tasks == {"review"} else "qwen3-27b",
+            "target": target["name"],
+            "base_model": target["base_model"],
+            "base_model_candidates": target["candidates"],
+            "train_precision": target["precision"],
+            "target_model": "qwen3.5-9b" if tasks == {"review"} else "qwen3.5-27b",
             "tasks": sorted(tasks) if tasks else ["agentic", "style", "review"],
             "max_tokens": max_tokens,
             "review_context_lines": review_context_lines,

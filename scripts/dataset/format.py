@@ -91,7 +91,7 @@ def render_qwen3(messages: list[dict]) -> str:
 
 
 # Names match Unsloth ``get_chat_template(..., chat_template=name)`` where that family exists.
-CHAT_TEMPLATES = ("qwen3", "chatml", "llama3", "gemma")
+CHAT_TEMPLATES = ("qwen3", "qwen3.5", "chatml", "llama3", "gemma")
 
 
 def render_chat(messages: list[dict], template: str = "qwen3") -> str:
@@ -99,6 +99,8 @@ def render_chat(messages: list[dict], template: str = "qwen3") -> str:
     name = (template or "qwen3").lower()
     if name not in CHAT_TEMPLATES:
         raise ValueError(f"Unknown chat template {template!r}. Choose one of: {', '.join(CHAT_TEMPLATES)}")
+    if name == "qwen3.5":
+        name = "qwen3"
     blocks = []
     for message in messages:
         role = message.get("role") or "user"

@@ -23,6 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-model", action="append", default=None, help="Keep OpenCode trajectories whose model label contains this text. Repeatable.")
     parser.add_argument("--model-weight", action="append", default=None, help="pattern=weight, for example claude=3. Preferred models are kept first.")
     parser.add_argument(
+        "--base-model",
+        default=None,
+        help="Checkpoint id for this target. Author defaults to Qwen/Qwen3.5-27B. Review defaults to Qwen/Qwen3.5-9B. Ornith-1.0-9B is the other reviewer candidate.",
+    )
+    parser.add_argument(
         "--chat-template",
         choices=list(CHAT_TEMPLATES),
         default="qwen3",
@@ -113,6 +118,7 @@ def main(argv: list[str] | None = None) -> None:
         seed=args.seed,
         tasks=tasks,
         chat_template=args.chat_template,
+        base_model=args.base_model,
         review_context_lines=args.review_context_lines if args.task == "review" else None,
         thinking=args.thinking,
         source_models=set(args.source_model or []) or None,

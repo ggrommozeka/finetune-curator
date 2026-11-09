@@ -201,6 +201,29 @@ def author_metrics(dpo_rows: list[dict], sft_rows: list[dict], complete_fn) -> d
     }
 
 
+def held_out_mr_rows(rows: list[dict]) -> list[dict]:
+    """Review rows tied to a merge request. Falls back to every review row."""
+    reviewish = [
+        row
+        for row in rows
+        if row.get("task") == "review" or str(row.get("kind") or "").startswith("review")
+    ]
+    mr_rows = [row for row in reviewish if str(row.get("group") or "").startswith("mr:")]
+    return mr_rows or reviewish
+
+
+def compare_reviewers(rows: list[dict], completers: dict, judge_fn=None) -> dict:
+    """Score several models on the same held-out MR rows."""
+    shared = held_out_mr_rows(rows)
+    report = {"rows": len(shared), "models": {}}
+    for name, complete_fn in completers.items():
+        report["models"][name] = {
+            **review_metrics(shared, complete_fn, judge_fn),
+            **false_positive_rate(shared, complete_fn),
+        }
+    return report
+
+
 def load_jsonl(path) -> list[dict]:
     rows = []
     text = path.read_text(encoding="utf-8") if hasattr(path, "read_text") else ""
