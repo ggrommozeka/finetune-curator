@@ -17,7 +17,7 @@ from pathlib import Path
 
 from scripts.gitlab.client import FixtureTransport, GitLabClient, GitLabError
 from scripts.gitlab.examples import sft_to_dpo
-from scripts.gitlab.link import DEFAULT_FIX_PATTERN, parse_user_time
+from scripts.gitlab.link import parse_user_time
 from scripts.gitlab.store import GitlabStore, parse_mr_ref
 from scripts.gitlab.sync import process_store, sync_store
 
@@ -89,11 +89,6 @@ def _add_http_args(parser: argparse.ArgumentParser) -> None:
 def _process_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mr", action="append", default=[], help="MR to process: project!iid. Repeatable.")
     parser.add_argument("--all", action="store_true", help="Process every MR in the store")
-    parser.add_argument(
-        "--reviewer",
-        default=None,
-        help="Optional view filter. Omit it so training data keeps every reviewer's comments.",
-    )
     parser.add_argument("--config", default=None, help="JSON file with team_leads and mrr_pattern (default: gitlab.json if present)")
     parser.add_argument(
         "--team-lead",
@@ -125,12 +120,16 @@ def build_parser() -> argparse.ArgumentParser:
     _store_arg(listing)
     listing.add_argument("--project", default="")
     listing.add_argument("--author", default="")
-    listing.add_argument("--reviewer", default="")
+    listing.add_argument("--reviewer", default="", help="View filter. Does not change stored comments.")
     listing.add_argument("--since", default="")
     listing.add_argument("--until", default="")
-    listing.add_argument("--fixes-only", action="store_true")
+    listing.add_argument(
+        "--linked-only",
+        action="store_true",
+        help="Only MRs with at least one comment linked to a later commit.",
+    )
+    listing.add_argument("--fixes-only", action="store_true", help="Deprecated alias of --linked-only.")
     listing.add_argument("--min-comments", type=int, default=0)
-    listing.add_argument("--fix-pattern", default=DEFAULT_FIX_PATTERN)
 
     process = sub.add_parser("process", help="Link comments and build examples offline")
     _store_arg(process)
@@ -161,8 +160,7 @@ def _compile_pattern(pattern: str) -> None:
 
 def _selected_refs(store: GitlabStore, args) -> list[str]:
     if args.all:
-        pattern = args.mrr_pattern or args.fix_pattern or DEFAULT_FIX_PATTERN
-        return [item["ref"] for item in store.list_mrs(fix_pattern=pattern)]
+        return [item["ref"] for item in store.list_mrs()]
     if not args.mr:
         raise SystemExit("Pass --mr project!iid (repeatable) or --all")
     for ref in args.mr:
@@ -270,7 +268,6 @@ def _signals(args):
 
 
 def _cmd_list(args) -> None:
-    _compile_pattern(args.fix_pattern)
     store = GitlabStore(args.store)
     try:
         rows = store.list_mrs(
@@ -279,9 +276,9 @@ def _cmd_list(args) -> None:
             reviewer=args.reviewer,
             since=args.since,
             until=args.until,
+            linked_only=args.linked_only,
             fixes_only=args.fixes_only,
             min_comments=args.min_comments,
-            fix_pattern=args.fix_pattern,
         )
     finally:
         store.close()
@@ -293,7 +290,7 @@ def _cmd_list(args) -> None:
         print(
             f"{row['ref']}\t{row['project_path'] or row['project_id']}\t!{row['iid']}\t"
             f"{row['author_username']}\t{reviewers}\tcomments={row['comment_count']}\t"
-            f"fixes={row['fix_count']}\t{row['merged_at']}\t{row['title']}"
+            f"linked={row['linked_count']}\tmrr={row['mrr_count']}\t{row['merged_at']}\t{row['title']}"
         )
 
 
@@ -329,7 +326,6 @@ def _cmd_process(args) -> None:
         stats = process_store(
             store,
             refs,
-            reviewer=args.reviewer,
             fix_pattern=config.mrr_pattern,
             signal_config=config,
             complete_fn=_polish_fn(args),

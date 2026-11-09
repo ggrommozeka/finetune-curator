@@ -7,10 +7,16 @@ import sys
 from pathlib import Path
 
 from scripts.rules.export import export_approved, export_skills, render_markdown
+from scripts.export_opencode import stamp_machine
+from scripts.rules.propose import propose_rules
 from scripts.rules.store import (
     approved_rules,
+    load_proposals,
     load_rule_decisions,
+    normalize_proposal,
+    save_proposals,
     save_rule_decisions,
+    upsert_proposals,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -318,6 +324,8 @@ def test_cli_mock_propose_and_export(tmp_path: Path):
     assert len(document["rules"]) == 2
     looping = next(rule for rule in document["rules"] if rule["category"] == "looping")
     safety = next(rule for rule in document["rules"] if rule["category"] == "safety")
+    assert looping["mode"] == "per-session"
+    assert safety["mode"] == "per-session"
     assert looping["session_ids"] == ["ses_loop", "ses_loop2"]
     assert "stop running the same command" in looping["evidence"]
     assert "retried pytest" in looping["evidence"]
@@ -361,6 +369,60 @@ def test_cli_mock_propose_and_export(tmp_path: Path):
 def test_help_commands():
     for module in ("scripts.propose_rules", "scripts.export_rules"):
         subprocess.run([sys.executable, "-m", module, "--help"], check=True, cwd=ROOT, capture_output=True)
+
+
+def test_per_session_mode_survives_normalize_and_blocks_other_modes(tmp_path: Path):
+    raw = [
+        {
+            "id": "ses_loop",
+            "score": 0.1,
+            "label": "bad",
+            "messages": [{"role": "user", "content": "stop"}],
+        }
+    ]
+    document = propose_rules(raw, {"labels": {"ses_loop": "discard"}}, lambda _messages: FIXTURE.read_text(encoding="utf-8"))
+    assert document["proposals"]
+    assert all(item["mode"] == "per-session" for item in document["proposals"])
+    normalized = normalize_proposal(document["proposals"][0])
+    assert normalized["mode"] == "per-session"
+
+    path = tmp_path / "rule_proposals.json"
+    corpus = {**normalized, "text": "corpus wording that must stay"}
+    corpus["mode"] = "corpus"
+    save_proposals(path, {"version": 2, "proposals": [corpus]})
+    upsert_proposals(path, [{**normalized, "text": "per-session overwrite"}], mode="per-session")
+    kept = load_proposals(path)["proposals"][0]
+    assert kept["text"] == "corpus wording that must stay"
+    assert kept["mode"] == "corpus"
+
+
+def test_stamp_machine_keeps_logminer_score(tmp_path: Path):
+    path = tmp_path / "raw_scored.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "a", "score": 0.42, "label": "maybe", "messages": []}),
+                json.dumps({"id": "b", "score": 0.9, "messages": [{"role": "user", "content": "hi"}]}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert stamp_machine(path, "laptop-a") == 2
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["machine"] == "laptop-a"
+    assert rows[0]["score"] == 0.42
+    assert rows[0]["label"] == "maybe"
+    assert rows[1]["machine"] == "laptop-a"
+    assert rows[1]["score"] == 0.9
+    help_text = subprocess.run(
+        [sys.executable, "-m", "scripts.export_opencode", "--help"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "--machine" in help_text
 
 
 def test_export_missing_proposals(tmp_path: Path):

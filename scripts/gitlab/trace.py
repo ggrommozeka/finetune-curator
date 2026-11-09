@@ -182,13 +182,12 @@ def _join_hunks(hunks: list[Hunk]) -> tuple[str, str, str]:
     return before, after, diff
 
 
-def iter_threads(discussions: list[dict], reviewer: str | None = None) -> list[dict]:
+def iter_threads(discussions: list[dict]) -> list[dict]:
     """One traceable comment per discussion root. Later notes in the thread are replies.
 
-    A reviewer filter keeps threads whose root author matches. It does not drop
-    replies from other people. System notes are never roots.
+    Every reviewer's root comment is kept. Filtering by reviewer is a view concern.
+    System notes are never roots.
     """
-    wanted = reviewer.lower() if reviewer else None
     threads = []
     for discussion in discussions or []:
         humans = []
@@ -200,14 +199,10 @@ def iter_threads(discussions: list[dict], reviewer: str | None = None) -> list[d
             humans.append(note)
         if not humans:
             continue
-        root = humans[0]
-        username = str((root.get("author") or {}).get("username") or "")
-        if wanted and username.lower() != wanted:
-            continue
         threads.append(
             {
                 "discussion_id": str(discussion.get("id") or ""),
-                "root": root,
+                "root": humans[0],
                 "replies": humans[1:],
             }
         )
@@ -231,7 +226,6 @@ def trace_thread(
     diffs_by_sha: dict[str, list],
     mr: dict | None = None,
     *,
-    fix_pattern: str = r"mrr\s*fixes",
     line_pad: int = 2,
     files: list[dict] | None = None,
 ) -> dict:
@@ -429,20 +423,17 @@ def build_traces(
     diffs_by_sha: dict[str, list],
     mr: dict | None = None,
     *,
-    reviewer: str | None = None,
-    fix_pattern: str = r"mrr\s*fixes",
     line_pad: int = 2,
     files: list[dict] | None = None,
     overrides: dict[str, dict] | None = None,
 ) -> list[dict]:
     traces = []
-    for thread in iter_threads(discussions, reviewer):
+    for thread in iter_threads(discussions):
         traced = trace_thread(
             thread,
             commits,
             diffs_by_sha,
             mr,
-            fix_pattern=fix_pattern,
             line_pad=line_pad,
             files=files,
         )
