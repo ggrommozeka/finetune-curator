@@ -8,14 +8,17 @@ import json
 from pathlib import Path
 
 
-def load_decisions(path: Path) -> dict[str, str]:
+def load_label_map(path: Path) -> dict[str, str]:
     if not path.exists():
         raise SystemExit(f"Decisions file not found: {path}")
     data = json.loads(path.read_text(encoding="utf-8"))
-    # expected: { "session_id": "keep" | "discard", ... }
-    if not isinstance(data, dict):
-        raise SystemExit("decisions.json must be an object {id: keep|discard}")
-    return {str(k): str(v).lower() for k, v in data.items()}
+    # New format: {"labels": {id: keep|discard}, "notes": {...}}
+    if isinstance(data, dict) and isinstance(data.get("labels"), dict):
+        return {str(k): str(v).lower() for k, v in data["labels"].items()}
+    # Legacy: {id: keep|discard}
+    if isinstance(data, dict):
+        return {str(k): str(v).lower() for k, v in data.items()}
+    raise SystemExit("decisions.json must be an object")
 
 
 def session_id(rec: dict) -> str:
@@ -35,7 +38,7 @@ def main() -> None:
     args = p.parse_args()
 
     src = Path(args.input)
-    decisions = load_decisions(Path(args.decisions))
+    labels = load_label_map(Path(args.decisions))
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -47,7 +50,7 @@ def main() -> None:
                 continue
             rec = json.loads(line)
             sid = session_id(rec)
-            decision = decisions.get(sid)
+            decision = labels.get(sid)
             if decision == "keep":
                 fout.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 kept += 1
