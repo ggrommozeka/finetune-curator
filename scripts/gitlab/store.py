@@ -192,6 +192,7 @@ class GitlabStore:
         files: list[dict],
         *,
         project_path: str | None = None,
+        issues: list | None = None,
     ) -> None:
         project_id = int(mr["project_id"])
         iid = int(mr["iid"])
@@ -200,6 +201,7 @@ class GitlabStore:
         self._write_raw(project_id, iid, "mr.json", mr)
         self._write_raw(project_id, iid, "discussions.json", discussions)
         self._write_raw(project_id, iid, "commits.json", commits)
+        self._write_raw(project_id, iid, "issues.json", issues or [])
         for sha, diffs in diffs_by_sha.items():
             self._write_raw(project_id, iid, f"diffs/{sha}.json", diffs)
 
@@ -477,6 +479,13 @@ class GitlabStore:
         mr = json.loads(row["raw_json"])
         discussions = json.loads(row["discussions_json"])
         commits = json.loads(row["commits_json"])
+        issues_path = self.raw_root / str(int(project_id)) / str(int(iid)) / "issues.json"
+        issues = []
+        if issues_path.is_file():
+            try:
+                issues = json.loads(issues_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                issues = []
         diffs_by_sha: dict[str, list] = {}
         for sha_row in self._conn.execute(
             "SELECT DISTINCT sha FROM diffs WHERE project_id = ?",
@@ -498,7 +507,7 @@ class GitlabStore:
                 "SELECT sha, path, side, content FROM files WHERE project_id = ?",
                 (int(project_id),),
             )
-            if item["sha"] in mr_shas
+            if item["sha"] in mr_shas or item["side"] == "base"
         ]
         return {
             "mr": mr,
@@ -506,6 +515,7 @@ class GitlabStore:
             "commits": commits,
             "diffs_by_sha": diffs_by_sha,
             "files": files,
+            "issues": issues if isinstance(issues, list) else [],
             "project_path": row["project_path"] or "",
         }
 
