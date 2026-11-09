@@ -4,14 +4,14 @@ import json
 import sqlite3
 from pathlib import Path
 
-from scripts.patterns.annotate import annotate_pending
-from scripts.patterns.cluster import cluster_annotations
-from scripts.patterns.import_sources import import_gitlab_traces, import_path
-from scripts.patterns.monitor import report, rollback
-from scripts.patterns.recommend import recommend_cluster
-from scripts.patterns.skills import skill_id
-from scripts.patterns.store import PatternStore
-from scripts.rules.parsing import extract_json
+from scripts.analysis.annotate import annotate_pending
+from scripts.analysis.cluster import cluster_annotations
+from scripts.analysis.import_sources import import_gitlab_traces, import_path
+from scripts.analysis.monitor import report, rollback
+from scripts.analysis.recommend import recommend_cluster
+from scripts.analysis.skills import skill_id
+from scripts.analysis.store import PatternStore
+from scripts.llm.parsing import extract_json
 
 ROOT = Path(__file__).resolve().parents[1]
 ANNOTATION = (ROOT / "tests" / "fixtures" / "pattern_annotation.json").read_text(encoding="utf-8")
@@ -83,8 +83,8 @@ def test_import_dedupes_incremental_and_sqlite_schemas(tmp_path: Path):
     assert v2_stats["added"] == 1
     missing = import_gitlab_traces(store, tmp_path / "no-gitlab")
     assert missing["schema"] == "gitlab-missing"
-    from scripts.gitlab.store import GitlabStore
-    from scripts.gitlab.sync import process_store
+    from scripts.ingest.gitlab.store import GitlabStore
+    from scripts.ingest.gitlab.sync import process_store
 
     gitlab = GitlabStore(tmp_path / "gitlab")
     gitlab.save_bundle(
@@ -126,7 +126,7 @@ def test_import_dedupes_incremental_and_sqlite_schemas(tmp_path: Path):
         [],
         project_path="group/app",
     )
-    from scripts.gitlab.signals import SignalConfig
+    from scripts.ingest.gitlab.signals import SignalConfig
 
     process_store(
         gitlab,
@@ -265,7 +265,7 @@ def test_export_report_and_rollback(tmp_path: Path):
     proposal = recommend_cluster(cluster, complete, existing_rules=[], success_note=None)
     proposals = tmp_path / "proposals.json"
     decisions = tmp_path / "decisions.json"
-    from scripts.rules.store import save_proposals, save_rule_decisions
+    from scripts.proposals.store import save_proposals, save_rule_decisions
 
     save_proposals(proposals, {"version": 2, "proposals": [proposal]})
     save_rule_decisions(decisions, {"statuses": {proposal["id"]: "approved"}, "edits": {}})

@@ -1,8 +1,8 @@
 """Dedup, JSON recovery, and the mockable LLM retry loop."""
 
 from scripts.rules.llm import build_chat_kwargs, request_rules, thinking_controls
-from scripts.rules.merge import make_rule_id, merge_rules, slug_category
-from scripts.rules.parsing import extract_json, strip_thinking
+from scripts.proposals.merge import make_rule_id, merge_rules, slug_category
+from scripts.llm.parsing import extract_json, strip_thinking
 
 
 def test_strip_thinking_variants():

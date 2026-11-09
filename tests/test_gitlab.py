@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.gitlab.anonymize import Anonymizer
-from scripts.gitlab.client import (
+from scripts.ingest.gitlab.anonymize import Anonymizer
+from scripts.ingest.gitlab.client import (
     FixtureTransport,
     GitLabClient,
     GitLabError,
@@ -19,18 +19,18 @@ from scripts.gitlab.client import (
     merge_request_path,
     redact,
 )
-from scripts.gitlab.examples import sft_to_dpo
-from scripts.gitlab.export import export_records
-from scripts.gitlab.link import (
+from scripts.ingest.gitlab.examples import sft_to_dpo
+from scripts.ingest.gitlab.export import export_records
+from scripts.ingest.gitlab.link import (
     comment_target,
     is_fix_message,
     link_comment,
     parse_hunks,
     parse_user_time,
 )
-from scripts.gitlab.store import GitlabStore
-from scripts.gitlab.sync import process_store, sync_store
-from scripts.rules.sessions import render_session, select_sessions
+from scripts.ingest.gitlab.store import GitlabStore
+from scripts.ingest.gitlab.sync import process_store, sync_store
+from scripts.ingest.opencode_sessions import render_session, select_sessions
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "gitlab_api.json"
@@ -106,7 +106,7 @@ def test_pagination_rate_limit_and_cache(tmp_path: Path):
 
 
 def test_line_movement_and_non_fix_commits():
-    from scripts.gitlab.trace import map_line, map_range, trace_thread
+    from scripts.ingest.gitlab.trace import map_line, map_range, trace_thread
 
     shifted, touched, _hunk = map_line(12, parse_hunks("@@ -1,0 +1,2 @@\n+added\n+lines\n"))
     assert shifted == 14
@@ -255,9 +255,9 @@ def test_export_fixture_anonymizes_and_builds_dpo(tmp_path: Path):
 
 
 def test_comment_fix_and_team_lead_polish_are_separate():
-    from scripts.gitlab.classify import classify_commits
-    from scripts.gitlab.polish import build_polish_records
-    from scripts.gitlab.signals import SignalConfig, is_mrr_title
+    from scripts.ingest.gitlab.classify import classify_commits
+    from scripts.ingest.gitlab.polish import build_polish_records
+    from scripts.ingest.gitlab.signals import SignalConfig, is_mrr_title
 
     assert is_mrr_title("MRR fixes: rename")
     assert is_mrr_title("mrr: tighten")
@@ -295,7 +295,7 @@ def test_comment_fix_and_team_lead_polish_are_separate():
 
 
 def test_one_team_lead_and_every_reviewer(tmp_path: Path):
-    from scripts.gitlab.signals import SignalConfig, load_signal_config
+    from scripts.ingest.gitlab.signals import SignalConfig, load_signal_config
 
     config_path = tmp_path / "gitlab.json"
     config_path.write_text(

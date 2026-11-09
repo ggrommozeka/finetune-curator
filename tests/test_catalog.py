@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from scripts.catalog import Catalog
+from scripts.ingest.catalog import Catalog
 
 
 def test_opencode_item_carries_source(tmp_path: Path):

@@ -164,7 +164,7 @@ def queue_session_pos(index: int) -> None:
 
 def open_evidence(ref: str) -> None:
     """Switch to the OpenCode session or the GitLab MR that this id points at."""
-    from scripts.catalog import Catalog
+    from scripts.ingest.catalog import Catalog
 
     item = Catalog(
         st.session_state.get("input_path") or st.session_state.get("cfg_input", DEFAULT_INPUT),

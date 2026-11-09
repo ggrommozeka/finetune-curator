@@ -1,0 +1,37 @@
+{
+  "profile": "author-bf16-1x80gb",
+  "target": "author",
+  "base_model": "Qwen/Qwen3.5-27B",
+  "chat_template": "qwen3",
+  "hardware": {
+    "machine": "rented",
+    "gpus": ["A100 80GB or H100 80GB"],
+    "gpu_count": 1,
+    "nvlink": false,
+    "system_ram_gb": null
+  },
+  "training": {
+    "precision": "bf16-lora",
+    "load_in_4bit": false,
+    "load_in_16bit": true,
+    "full_finetuning": false,
+    "device_map": null,
+    "cpu_offload": false,
+    "max_seq_length": 32768,
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "gradient_checkpointing": "unsloth",
+    "learning_rate": 0.0002,
+    "lora_r": 16,
+    "lora_alpha": 16
+  },
+  "dataset": {
+    "task": "author",
+    "max_tokens": 32000
+  },
+  "notes": [
+    "Train on one rented 80GB GPU. Unsloth's bf16 LoRA figure for Qwen3.5-27B is about 56GB.",
+    "Do not train this 27B on the local 2x 16GB cards, and do not use CPU offload. 80GB of system RAM is not a substitute for GPU memory.",
+    "Download the LoRA, merge or convert it to GGUF, and serve that file locally with llama.cpp."
+  ]
+}

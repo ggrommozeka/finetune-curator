@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.patterns.monitor import report, rollback
-from scripts.patterns.store import PatternStore
+from scripts.analysis.monitor import report, rollback
+from scripts.analysis.store import PatternStore
 from shared import widget_value
 
 

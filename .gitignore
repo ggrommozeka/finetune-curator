@@ -11,6 +11,7 @@ data/*.md
 data/gitlab_cache/
 data/gitlab/
 data/patterns/
+data/finetune/
 !data/.gitkeep
 .env
 gitlab.json

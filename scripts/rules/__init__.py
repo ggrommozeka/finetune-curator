@@ -1,1 +1,1 @@
-"""Harness-rule extraction: propose, review, and export system-prompt rules."""
+"""Compatibility package for the rule prompt. Chat lives in scripts.llm; proposals in scripts.proposals."""

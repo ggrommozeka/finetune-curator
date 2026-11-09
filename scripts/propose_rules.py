@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from scripts.rules.endpoint import (
+from scripts.llm.endpoint import (
     EndpointError,
     fetch_model_ids,
     format_endpoint,
@@ -16,16 +16,16 @@ from scripts.rules.endpoint import (
     resolve_endpoint,
 )
 from scripts.rules.llm import chat_complete, thinking_controls
-from scripts.rules.opencode_config import (
+from scripts.llm.opencode_config import (
     discover_config_files,
     iter_configured_models,
     load_merged_config,
     resolve_model_ref,
 )
-from scripts.rules.parsing import ModelOutputError
-from scripts.rules.propose import propose_rules
-from scripts.rules.sessions import load_jsonl, load_review_decisions
-from scripts.rules.store import save_proposals
+from scripts.llm.parsing import ModelOutputError
+from scripts.proposals.propose import propose_rules
+from scripts.ingest.opencode_sessions import load_jsonl, load_review_decisions
+from scripts.proposals.store import save_proposals
 
 
 def _parse_sources(value: str) -> tuple[str, ...]:
