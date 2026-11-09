@@ -188,77 +188,87 @@ export FINETUNE_CURATOR_MODEL=qwen3-27b-q5
 
 ## GitLab merge-request reviews
 
-Company review history can feed the same curator. This talks to a self-hosted GitLab: merged merge requests, review discussions (including inline diff notes), and follow-up commits whose message matches `MRR fixes` (case-insensitive; change it with `--fix-pattern`).
+Company review history stays on disk. Phase 1 talks to GitLab. Phase 2 never does.
 
-Each review comment is linked to the fix that addressed it:
-
-1. same file and overlapping lines, comment timestamp before the commit (confidence 0.9)
-2. same file, lines do not overlap (confidence 0.55)
-3. otherwise the earliest later `MRR fixes` commit on the MR (confidence 0.3)
-
-Nothing is committed. The token comes from `GITLAB_TOKEN` and is not printed. API responses can be cached under `data/gitlab_cache/` (gitignored). Pass `--anonymize` to strip author names and emails, and `--anonymize-urls` to replace `http(s)` URLs as well. `--ca-bundle` trusts a private CA; `--insecure` turns verification off.
+**Phase 1 — sync.** Pull merged MRs (description, discussions with inline positions, commits, diffs, and file text at the commit and its parent when GitLab returns it) into `data/gitlab/` (SQLite plus raw JSON, gitignored). Re-running skips MRs already stored. `--refresh project!iid` refetches one MR. The token is `GITLAB_TOKEN` and is not printed or written into the store.
 
 ```bash
-export GITLAB_TOKEN=...   # personal access token, api scope. Do not commit it.
-python -m scripts.export_gitlab_mrr \
+export GITLAB_TOKEN=...   # api scope. Do not commit it.
+python -m scripts.export_gitlab_mrr sync \
   --base-url https://gitlab.company.internal \
   --ca-bundle /path/to/company-ca.pem \
   --group my-group \
   --since 2025-01-01 \
-  --until 2026-01-01 \
+  --until 2026-01-01
+
+# later, only new MRs are fetched
+python -m scripts.export_gitlab_mrr sync \
+  --base-url https://gitlab.company.internal \
+  --group my-group
+
+# re-fetch one MR
+python -m scripts.export_gitlab_mrr sync \
+  --base-url https://gitlab.company.internal \
+  --refresh group/app!42
+```
+
+`--project group/app` (repeatable) limits the sync to specific projects. `--insecure` disables TLS verification.
+
+**Phase 2 — process offline.** Pick MRs in the viewer (**GitLab** page: filter by project, author, reviewer, date, MRR-fix commits, comment count) or on the CLI. Processing links each review comment to a later commit whose message matches `MRR fixes` (case-insensitive regex, `--fix-pattern`):
+
+1. same file and overlapping lines (confidence 0.9)
+2. same file, lines do not overlap (confidence 0.55)
+3. otherwise the earliest later fix commit on the MR (confidence 0.3)
+
+Examples and keep/discard edits are stored in separate tables from the raw MR, so you can process again without fetching. `--anonymize` strips author names and emails from examples only; `--anonymize-urls` also replaces URLs. The raw store is left intact.
+
+```bash
+python -m scripts.export_gitlab_mrr list --reviewer team.lead --fixes-only
+
+python -m scripts.export_gitlab_mrr process \
+  --mr group/app!42 --mr group/app!43 \
   --reviewer team.lead \
-  --anonymize \
-  --anonymize-urls \
+  --anonymize --anonymize-urls
+
+python -m scripts.export_gitlab_mrr process --all --reviewer team.lead
+```
+
+In the viewer, open an MR (description, comments, diffs), keep or discard each example, and edit the training text. Decisions survive a re-process of the same MR.
+
+Export writes only `keep` rows unless you pass `--status`. SFT uses the Unsloth `messages` JSONL. DPO uses `prompt` / `chosen` / `rejected` (rejected is the code before the fix).
+
+```bash
+python -m scripts.export_gitlab_mrr export \
+  --status keep \
   --sft data/gitlab_sft.jsonl \
   --dpo data/gitlab_dpo.jsonl
 ```
 
-`--project group/app` (repeatable) limits the export to specific projects. `--group` reads merged MRs from that group.
-
-`data/gitlab_sft.jsonl` is the same messages JSONL as the OpenCode export, so the viewer keep/discard flow and `export_approved` work unchanged. Open a row to see the comment plus the before/after code. The sidebar filter **Только GitLab review** hides other sessions.
+Optional rule proposal uses the same LLM path as session rules and does not call GitLab. `--mock-response` skips the network entirely:
 
 ```bash
-streamlit run viewer/app.py -- --input data/gitlab_sft.jsonl
-
-python -m scripts.export_approved \
-  --input data/gitlab_sft.jsonl \
-  --decisions data/decisions.json \
-  --output data/gitlab_approved.jsonl
+python -m scripts.export_gitlab_mrr process \
+  --mr group/app!42 \
+  --rules \
+  --mock-response tests/fixtures/sample_rules_response.txt
 ```
 
-The SFT user turn is the MR title, description, review comment, and the code before the fix. The assistant turn is the updated code. The DPO file uses Unsloth's `prompt` / `chosen` / `rejected` columns (`rejected` is the code before, `chosen` is the fix, `prompt` includes the comment). Rebuild DPO from an already reviewed SFT file without calling GitLab:
+Approve those rules on the **Правила** page. `gitlab_review` is not part of the default session sources.
+
+Smoke-test both phases with the recorded fixture:
 
 ```bash
-python -m scripts.export_gitlab_mrr \
-  --dpo-from data/gitlab_approved.jsonl \
-  --dpo data/gitlab_dpo.jsonl
-```
-
-Load the DPO file with `datasets.load_dataset("json", data_files="data/gitlab_dpo.jsonl", split="train")`.
-
-Those review examples are also a rules source. Point `propose_rules` at the GitLab JSONL and add `gitlab_review` (it is not included in the default sources):
-
-```bash
-python -m scripts.propose_rules \
-  --input data/gitlab_sft.jsonl \
-  --sources gitlab_review \
-  --output data/rule_proposals.json \
-  --base-url http://127.0.0.1:8080/v1
-```
-
-Approve the proposed rules on the **Правила** page the same way as session-derived rules.
-
-Smoke-test the exporter without a network or a token leak, using the recorded fixture:
-
-```bash
-GITLAB_TOKEN=example python -m scripts.export_gitlab_mrr \
+GITLAB_TOKEN=example python -m scripts.export_gitlab_mrr sync \
   --base-url https://gitlab.example.com \
   --project group/app \
-  --reviewer teamlead \
   --fixture tests/fixtures/gitlab_api.json \
-  --no-cache \
-  --sft /tmp/gitlab_sft.jsonl \
-  --dpo /tmp/gitlab_dpo.jsonl
+  --store /tmp/gitlab-store
+
+python -m scripts.export_gitlab_mrr process \
+  --store /tmp/gitlab-store \
+  --mr group/app!7 \
+  --reviewer teamlead \
+  --anonymize
 ```
 
 ## Layout
@@ -273,12 +283,13 @@ finetune-curator/
 │   ├── export_approved.py    # Keep-only JSONL export
 │   ├── propose_rules.py      # LLM rule proposals
 │   ├── export_rules.py       # Approved rules → Markdown + JSON
-│   ├── export_gitlab_mrr.py  # GitLab MR review → SFT + DPO
+│   ├── export_gitlab_mrr.py  # GitLab sync / process / export
 │   ├── rules/                # selection, merge, endpoint, export
-│   └── gitlab/               # GitLab client, linking, anonymize
+│   └── gitlab/               # client, store, sync, linking, anonymize
 ├── viewer/
-│   ├── app.py                # Streamlit keep/discard + rules review
+│   ├── app.py                # Streamlit keep/discard + rules + GitLab
 │   ├── rules_page.py
+│   ├── gitlab_page.py        # stored MRs, offline process, example review
 │   └── gitlab_panel.py       # before/after review card
 ├── tests/
 └── data/                     # local only (gitignored)

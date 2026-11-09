@@ -275,12 +275,17 @@ def main() -> None:
     with st.sidebar:
         st.markdown("### ◈ finetune-curator")
         st.caption("Разметка траекторий для SFT / Unsloth")
-        page = st.radio("Раздел", ["Сессии", "Правила"], key="page")
+        page = st.radio("Раздел", ["Сессии", "Правила", "GitLab"], key="page")
 
     if page == "Правила":
         from rules_page import render_rules_page
 
         render_rules_page(cli)
+        return
+    if page == "GitLab":
+        from gitlab_page import render_gitlab_page
+
+        render_gitlab_page(cli)
         return
 
     _render_sessions(cli)

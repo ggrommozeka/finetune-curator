@@ -28,6 +28,8 @@ from scripts.gitlab.link import (
     parse_hunks,
     parse_user_time,
 )
+from scripts.gitlab.store import GitlabStore
+from scripts.gitlab.sync import process_store, sync_store
 from scripts.rules.sessions import render_session, select_sessions
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -244,72 +246,194 @@ def test_gitlab_review_source_is_opt_in():
     assert "review_file: app.py" in preamble
 
 
+def _sync_client(tmp_path: Path, transport=None) -> tuple[GitLabClient, GitlabStore]:
+    store = GitlabStore(tmp_path / "gitlab")
+    client = GitLabClient(
+        "https://gitlab.example.com",
+        TOKEN,
+        cache_dir=None,
+        transport=transport or FixtureTransport.from_file(FIXTURE),
+    )
+    return client, store
+
+
+def test_sync_is_incremental_and_process_is_offline(tmp_path: Path):
+    transport = FixtureTransport.from_file(FIXTURE)
+    client, store = _sync_client(tmp_path, transport)
+    first = sync_store(
+        client,
+        store,
+        projects=["group/app"],
+        since=parse_user_time("2024-03-01"),
+        until=parse_user_time("2024-03-31", end_of_day=True),
+    )
+    assert first["fetched"] == 1
+    assert first["skipped"] == 0
+    calls_after_sync = len(transport.calls)
+    assert (tmp_path / "gitlab" / "raw" / "1" / "7" / "discussions.json").is_file()
+    assert store.has_mr(1, 7)
+    raw_db = (tmp_path / "gitlab" / "store.db").read_bytes()
+    assert TOKEN.encode() not in raw_db
+    assert b"lead@company.com" in raw_db
+
+    second = sync_store(
+        client,
+        store,
+        projects=["group/app"],
+        since=parse_user_time("2024-03-01"),
+        until=parse_user_time("2024-03-31", end_of_day=True),
+    )
+    assert second["fetched"] == 0
+    assert second["skipped"] == 1
+    assert len(transport.calls) == calls_after_sync + 1
+
+    def offline(*_args, **_kwargs):
+        raise AssertionError("process must not touch GitLab")
+
+    client.transport = offline
+    stats = process_store(store, ["1!7"], reviewer="teamlead", anonymize=True, anonymize_urls=True)
+    assert stats["examples"] == 2
+    assert stats["file_line"] == 1
+    example_id = store.examples_for(1, 7)[0]["id"]
+    store.set_decision(example_id, "keep", user_text="EDITED INPUT", assistant_text="EDITED OUTPUT")
+    process_store(store, ["group/app!7"], reviewer="teamlead", anonymize=True, anonymize_urls=True)
+    decision = store.get_decision(example_id)
+    assert decision["status"] == "keep"
+    assert decision["user_text"] == "EDITED INPUT"
+    exported = store.export_records(status="keep")
+    assert len(exported) == 1
+    assert exported[0]["messages"][0]["content"] == "EDITED INPUT"
+    assert exported[0]["messages"][1]["content"] == "EDITED OUTPUT"
+    blob = json.dumps(store.export_records(status="all"))
+    assert "lead@company.com" not in blob
+    assert "https://" not in blob
+    listed = store.list_mrs(reviewer="teamlead", fixes_only=True, min_comments=1)
+    assert [row["ref"] for row in listed] == ["1!7"]
+    assert store.list_mrs(fixes_only=True, since="2025-01-01") == []
+    client.transport = transport
+    refreshed = sync_store(client, store, refresh=["1!7"])
+    assert refreshed["refreshed"] == 1
+    assert refreshed["fetched"] == 0
+    store.close()
+
+
+def test_sync_stores_file_contents(tmp_path: Path):
+    base = FixtureTransport.from_file(FIXTURE)
+
+    def transport(method, url, headers):
+        if "/repository/files/" in urllib.parse.unquote(url) and "ref=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" in url:
+            return 200, {}, b"context\nold_name\ncontext2\n"
+        return base(method, url, headers)
+
+    client, store = _sync_client(tmp_path, transport)
+    sync_store(client, store, projects=["group/app"])
+    bundle = store.load_bundle(1, 7)
+    stored = [item for item in bundle["files"] if item["side"] == "after" and item["path"] == "app.py"]
+    assert stored and "old_name" in stored[0]["content"]
+    store.close()
+
+
 def test_cli_fixture_does_not_leak_token(tmp_path: Path):
+    store = tmp_path / "gitlab"
     sft = tmp_path / "sft.jsonl"
     dpo = tmp_path / "dpo.jsonl"
-    cache = tmp_path / "cache"
+    rules = tmp_path / "rules.json"
     env = os.environ.copy()
     env["GITLAB_TOKEN"] = TOKEN
-    proc = subprocess.run(
+
+    def run(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "scripts.export_gitlab_mrr", *args],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    synced = run(
         [
-            sys.executable,
-            "-m",
-            "scripts.export_gitlab_mrr",
+            "sync",
+            "--store",
+            str(store),
             "--base-url",
             "https://gitlab.example.com",
             "--project",
             "group/app",
-            "--reviewer",
-            "TeamLead",
             "--since",
             "2024-03-01",
             "--until",
             "2024-03-31",
             "--fixture",
             str(FIXTURE),
-            "--cache-dir",
-            str(cache),
+        ]
+    )
+    assert synced.returncode == 0, synced.stderr + synced.stdout
+    assert TOKEN not in synced.stdout + synced.stderr
+    again = run(
+        [
+            "sync",
+            "--store",
+            str(store),
+            "--base-url",
+            "https://gitlab.example.com",
+            "--project",
+            "group/app",
+            "--fixture",
+            str(FIXTURE),
+        ]
+    )
+    assert again.returncode == 0, again.stderr
+    assert "skipped: 1" in again.stdout
+
+    processed = run(
+        [
+            "process",
+            "--store",
+            str(store),
+            "--mr",
+            "group/app!7",
+            "--reviewer",
+            "TeamLead",
             "--anonymize",
             "--anonymize-urls",
+            "--rules",
+            "--mock-response",
+            str(ROOT / "tests" / "fixtures" / "sample_rules_response.txt"),
+            "--rules-output",
+            str(rules),
+        ]
+    )
+    assert processed.returncode == 0, processed.stderr + processed.stdout
+    assert "file+line: 1" in processed.stdout
+    assert TOKEN not in rules.read_text(encoding="utf-8")
+
+    db = GitlabStore(store)
+    for item in db.examples_for(1, 7):
+        db.set_decision(item["id"], "keep")
+    db.close()
+
+    exported = run(
+        [
+            "export",
+            "--store",
+            str(store),
+            "--status",
+            "keep",
             "--sft",
             str(sft),
             "--dpo",
             str(dpo),
-        ],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        ]
     )
-    assert proc.returncode == 0, proc.stderr + proc.stdout
-    published = proc.stdout + proc.stderr + sft.read_text(encoding="utf-8") + dpo.read_text(encoding="utf-8")
-    cached = "".join(path.read_text(encoding="utf-8") for path in cache.glob("*.json"))
+    assert exported.returncode == 0, exported.stderr
+    published = exported.stdout + sft.read_text(encoding="utf-8") + dpo.read_text(encoding="utf-8")
     assert TOKEN not in published
-    assert TOKEN not in cached
     assert "lead@company.com" not in published
     assert "https://" not in published
-    assert "file+line: 1" in proc.stdout
     rows = [json.loads(line) for line in sft.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 2
-    dpo_rows = [json.loads(line) for line in dpo.read_text(encoding="utf-8").splitlines()]
-    assert {row["id"] for row in dpo_rows} == {row["id"] for row in rows}
     rebuilt = tmp_path / "dpo2.jsonl"
-    again = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "scripts.export_gitlab_mrr",
-            "--dpo-from",
-            str(sft),
-            "--dpo",
-            str(rebuilt),
-        ],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert again.returncode == 0, again.stderr
+    dpo_only = run(["export", "--dpo-from", str(sft), "--dpo", str(rebuilt)])
+    assert dpo_only.returncode == 0, dpo_only.stderr
     assert rebuilt.read_text(encoding="utf-8") == dpo.read_text(encoding="utf-8")

@@ -177,6 +177,34 @@ class GitLabClient:
             page = nxt_page
         return items
 
+    def get_all_optional(self, path: str, params: dict | None = None) -> list:
+        """Like ``get_all``, but a 404 is an empty list so one missing commit does not abort sync."""
+        try:
+            return self.get_all(path, params)
+        except GitLabError as exc:
+            if str(exc).startswith("GitLab 404"):
+                return []
+            raise
+
+    def get_text(self, path: str, params: dict | None = None) -> str | None:
+        """Fetch a raw file. ``None`` on 404. Other errors raise ``GitLabError``."""
+        url = self._url(path, params)
+        last_status = None
+        for attempt in range(self.max_retries):
+            status, headers, body = self._call("GET", url)
+            headers = _norm_headers(headers)
+            if status == 429 or status == 503:
+                last_status = status
+                self.sleep(_retry_delay(headers, attempt, self.clock()))
+                continue
+            if status == 404:
+                return None
+            if status >= 400:
+                snippet = body.decode("utf-8", errors="replace")[:300]
+                raise GitLabError(redact(f"GitLab {status} for {path}: {snippet}", self.token))
+            return body.decode("utf-8", errors="replace")
+        raise GitLabError(redact(f"GitLab rate limit persisted ({last_status}) for {path}", self.token))
+
     def request_json(self, method: str, path: str, params: dict | None = None):
         url = self._url(path, params)
         cached = self._read_cache(method, url)

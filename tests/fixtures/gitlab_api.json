@@ -1,6 +1,25 @@
 {
   "responses": [
     {
+      "path": "/api/v4/projects/1/merge_requests/7",
+      "pages": [
+        {
+          "body": {
+            "id": 100,
+            "iid": 7,
+            "project_id": 1,
+            "title": "Add parser",
+            "description": "Parse config files",
+            "state": "merged",
+            "merged_at": "2024-03-02T12:00:00.000Z",
+            "updated_at": "2024-03-02T12:00:00.000Z",
+            "web_url": "https://gitlab.example.com/group/app/-/merge_requests/7",
+            "author": {"username": "author1", "name": "Ada Author"}
+          }
+        }
+      ]
+    },
+    {
       "path": "/api/v4/projects/group/app/merge_requests",
       "pages": [
         {

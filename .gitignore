@@ -9,6 +9,7 @@ data/decisions.json
 data/*.json
 data/*.md
 data/gitlab_cache/
+data/gitlab/
 !data/.gitkeep
 .env
 *.egg-info/
