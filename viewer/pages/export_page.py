@@ -73,16 +73,37 @@ def render() -> None:
             st.error(str(exc) or "export failed")
         else:
             st.success(f"{gitlab_sft} · {gitlab_dpo}")
-    st.markdown("#### Единый датасет")
-    st.caption("Agentic, style, and review samples in one Unsloth chat JSONL, plus a held-out split.")
-    output_dir = st.text_input("Output dir", value="data/finetune")
-    agentic = st.slider("Доля agentic", 0.0, 1.0, 0.5, 0.05)
-    style = st.slider("Доля style", 0.0, 1.0, 0.25, 0.05)
-    review = st.slider("Доля review", 0.0, 1.0, 0.25, 0.05)
-    max_tokens = st.number_input("Макс. токенов", min_value=256, value=32000, step=256)
+    st.markdown("#### Датасеты для обучения")
+    st.caption(
+        "all — смесь для большой модели (32k). agentic и style — те же задачи отдельно. "
+        "review — отдельный датасет для модели ~9B: короче, дифф только вокруг комментария."
+    )
+    dataset_task = st.selectbox("Задача", ["all", "agentic", "style", "review"], key="finetune_task")
+    chat_template = st.selectbox("Chat template", ["qwen3", "chatml", "llama3", "gemma"], key="finetune_template")
+    output_dir = st.text_input("Output dir", value=f"data/finetune/{dataset_task}", key=f"finetune_dir_{dataset_task}")
+    token_default = 8192 if dataset_task == "review" else 32000
+    max_tokens = st.number_input(
+        "Макс. токенов",
+        min_value=256,
+        value=token_default,
+        step=256,
+        key=f"finetune_tokens_{dataset_task}",
+    )
+    context_lines = st.number_input(
+        "Строк контекста вокруг комментария",
+        min_value=1,
+        value=20,
+        step=1,
+        key="finetune_context_lines",
+    )
+    agentic = style = review = 0.0
+    if dataset_task == "all":
+        agentic = st.slider("Доля agentic", 0.0, 1.0, 0.5, 0.05)
+        style = st.slider("Доля style", 0.0, 1.0, 0.25, 0.05)
+        review = st.slider("Доля review", 0.0, 1.0, 0.25, 0.05)
     eval_ratio = st.slider("Held-out", 0.0, 0.5, 0.1, 0.05)
     anonymize = st.checkbox("Анонимизировать датасет", value=False)
-    if st.button("Собрать единый датасет"):
+    if st.button("Собрать датасет"):
         argv = [
             "--input",
             input_path,
@@ -94,17 +115,19 @@ def render() -> None:
             st.session_state.get("cfg_patterns", "data/patterns"),
             "--output-dir",
             output_dir,
-            "--agentic",
-            str(agentic),
-            "--style",
-            str(style),
-            "--review",
-            str(review),
+            "--task",
+            dataset_task,
+            "--chat-template",
+            chat_template,
             "--max-tokens",
             str(int(max_tokens)),
+            "--review-context-lines",
+            str(int(context_lines)),
             "--eval-ratio",
             str(eval_ratio),
         ]
+        if dataset_task == "all":
+            argv.extend(["--agentic", str(agentic), "--style", str(style), "--review", str(review)])
         if anonymize:
             argv.append("--anonymize")
         try:

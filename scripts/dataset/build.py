@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scripts.dataset.format import render_qwen3
+from scripts.dataset.format import CHAT_TEMPLATES, render_chat
 from scripts.dataset.mix import anonymize_samples, assign_splits, dedup, fit_length, manifest_block, mix_ratios
 from scripts.dataset.tasks import from_gitlab_store, from_opencode, load_machine_labels
 from scripts.gitlab.signals import SignalConfig, load_signal_config
 
 DEFAULT_RATIOS = {"agentic": 0.5, "style": 0.25, "review": 0.25}
+LARGE_MAX_TOKENS = 32_000
+REVIEW_MAX_TOKENS = 8_192
+REVIEW_CONTEXT_LINES = 20
 
 
 def build_samples(
@@ -28,16 +31,31 @@ def build_samples(
     min_score: float = 0.6,
     signal_config: SignalConfig | None = None,
     seed: str = "finetune",
+    tasks: set[str] | None = None,
+    chat_template: str = "qwen3",
+    review_context_lines: int | None = None,
 ) -> dict:
+    if chat_template not in CHAT_TEMPLATES:
+        raise ValueError(f"Unknown chat template {chat_template!r}")
     ratios = dict(ratios or DEFAULT_RATIOS)
+    if tasks:
+        ratios = {task: (1.0 if task in tasks else 0.0) for task in DEFAULT_RATIOS}
     machines = load_machine_labels(patterns_root) if patterns_root else {}
     samples = []
-    if opencode_path:
+    if opencode_path and (not tasks or "agentic" in tasks):
         samples.extend(
             from_opencode(opencode_path, decisions_path, machines=machines, min_score=min_score)
         )
-    if gitlab_root:
-        samples.extend(from_gitlab_store(gitlab_root, signal_config or load_signal_config()))
+    if gitlab_root and (not tasks or "style" in tasks or "review" in tasks):
+        samples.extend(
+            from_gitlab_store(
+                gitlab_root,
+                signal_config or load_signal_config(),
+                review_context_lines=review_context_lines if tasks == {"review"} else None,
+            )
+        )
+    if tasks:
+        samples = [sample for sample in samples if sample.task in tasks]
     samples = dedup(samples)
     samples = fit_length(samples, max_tokens, chars_per_token)
     if anonymize or anonymize_urls:
@@ -49,14 +67,17 @@ def build_samples(
         "train": train,
         "eval": held,
         "manifest": {
-            "chat_template": "qwen3",
+            "chat_template": chat_template,
+            "tasks": sorted(tasks) if tasks else ["agentic", "style", "review"],
             "max_tokens": max_tokens,
+            "review_context_lines": review_context_lines,
             "eval_ratio": eval_ratio,
             "ratios": ratios,
             "train": manifest_block(train),
             "eval": manifest_block(held),
-            "template_preview": render_qwen3(
-                [{"role": "system", "content": "You are a coding agent."}, {"role": "user", "content": "ping"}]
+            "template_preview": render_chat(
+                [{"role": "system", "content": "You are a coding agent."}, {"role": "user", "content": "ping"}],
+                chat_template,
             ),
         },
     }

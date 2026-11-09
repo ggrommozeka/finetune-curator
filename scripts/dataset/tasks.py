@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from scripts.dataset.format import split_messages, to_tool_message
+from scripts.dataset.format import clip_diff_context, split_messages, to_tool_message
 from scripts.gitlab.classify import classify_commits
 from scripts.gitlab.link import parse_hunks
 from scripts.gitlab.polish import iter_hunks
@@ -231,9 +231,14 @@ def review_comment_sample(
     line_start,
     line_end,
     suggested: str = "",
+    context_lines: int | None = None,
 ) -> Sample | None:
     if not comment.strip():
         return None
+    if context_lines is not None:
+        diff = clip_diff_context(diff, line_start, line_end, context_lines)
+        if suggested.strip():
+            suggested = "\n".join(suggested.splitlines()[: max(context_lines * 2, 1)])
     lines = ""
     if line_start:
         lines = f"{line_start}-{line_end or line_start}"
@@ -259,12 +264,27 @@ def review_comment_sample(
         messages=messages,
         gold=comment.strip(),
         extra={"reviewer": reviewer, "file": file_name, "lines": lines},
+        dpo={
+            "prompt": messages[:-1],
+            "chosen": [messages[-1]],
+            "rejected": [{"role": "assistant", "content": NO_ISSUES}],
+        },
     )
 
 
-def review_negative_sample(*, sample_id: str, group: str, machine: str, file_name: str, diff: str) -> Sample | None:
+def review_negative_sample(
+    *,
+    sample_id: str,
+    group: str,
+    machine: str,
+    file_name: str,
+    diff: str,
+    context_lines: int | None = None,
+) -> Sample | None:
     if not diff.strip():
         return None
+    if context_lines is not None:
+        diff = clip_diff_context(diff, None, None, context_lines)
     user = f"Review this diff. Name the file and lines when you comment.\n\nFile: {file_name}\n```diff\n{diff}\n```"
     messages = _with_system(
         REVIEW_SYSTEM,
@@ -280,6 +300,11 @@ def review_negative_sample(*, sample_id: str, group: str, machine: str, file_nam
         messages=messages,
         gold=NO_ISSUES,
         extra={"file": file_name},
+        dpo={
+            "prompt": messages[:-1],
+            "chosen": [messages[-1]],
+            "rejected": [{"role": "assistant", "content": "This change introduces a bug."}],
+        },
     )
 
 
@@ -346,7 +371,13 @@ def _anchors(traces: list[dict]) -> list[dict]:
     return found
 
 
-def from_gitlab_bundle(bundle: dict, config: SignalConfig, *, machine: str = "gitlab") -> list[Sample]:
+def from_gitlab_bundle(
+    bundle: dict,
+    config: SignalConfig,
+    *,
+    machine: str = "gitlab",
+    review_context_lines: int | None = None,
+) -> list[Sample]:
     mr = bundle.get("mr") or {}
     project_id = mr.get("project_id")
     iid = mr.get("iid")
@@ -409,6 +440,7 @@ def from_gitlab_bundle(bundle: dict, config: SignalConfig, *, machine: str = "gi
             line_start=(anchor.get("new_line_start") or anchor.get("old_line_start")),
             line_end=(anchor.get("new_line_end") or anchor.get("old_line_end")),
             suggested=trace.get("after") or "",
+            context_lines=review_context_lines,
         )
         if review:
             samples.append(review)
@@ -423,6 +455,7 @@ def from_gitlab_bundle(bundle: dict, config: SignalConfig, *, machine: str = "gi
                 reviewer=reply.get("author_username") or "",
                 line_start=(anchor.get("new_line_start") or anchor.get("old_line_start")),
                 line_end=(anchor.get("new_line_end") or anchor.get("old_line_end")),
+                context_lines=review_context_lines,
             )
             if reply_review:
                 samples.append(reply_review)
@@ -455,13 +488,14 @@ def from_gitlab_bundle(bundle: dict, config: SignalConfig, *, machine: str = "gi
                     machine=machine,
                     file_name=path,
                     diff=hunk.text,
+                    context_lines=review_context_lines,
                 )
                 if negative:
                     samples.append(negative)
     return samples
 
 
-def from_gitlab_store(root, config: SignalConfig | None = None) -> list[Sample]:
+def from_gitlab_store(root, config: SignalConfig | None = None, *, review_context_lines: int | None = None) -> list[Sample]:
     from pathlib import Path
 
     root = Path(root)
@@ -479,7 +513,7 @@ def from_gitlab_store(root, config: SignalConfig | None = None) -> list[Sample]:
             if bundle is None:
                 continue
             bundle["traces"] = store.traces_for(row["project_id"], row["iid"])
-            samples.extend(from_gitlab_bundle(bundle, config))
+            samples.extend(from_gitlab_bundle(bundle, config, review_context_lines=review_context_lines))
         return samples
     finally:
         store.close()

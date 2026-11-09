@@ -320,7 +320,9 @@ Export records the file versions and the adoption time. The report compares sess
 - **Style.** Team-lead commits (MRR titles and the lead's other commits) and comment-then-fix pairs become "rewrite this code following project conventions" samples. The code before the edit is the DPO `rejected` completion; the code after is `chosen`.
 - **Review.** A diff hunk is the input and the review comment, from every reviewer, is the output, with a suggested fix when the comment was linked to one. Hunks nobody commented on are negatives whose target is `No issues.`
 
-`--agentic`, `--style`, and `--review` are mixing weights. Held-out rows are chosen by session id or MR id, so one session or MR never appears in both `train.jsonl` and `eval.jsonl`. Long conversations are split on turn boundaries under `--max-tokens` (default 32000). `--anonymize` strips emails and URLs. `manifest.json` counts rows by task, source, and machine. Messages are the OpenAI tool-calling schema Qwen3's chat template consumes (`<|im_start|>` / `<|im_end|>` and `<tool_call>` blocks).
+`--agentic`, `--style`, and `--review` are mixing weights for `--task all`. Held-out rows are chosen by session id or MR id, so one session or MR never appears in both `train.jsonl` and `eval.jsonl`. Long conversations are split on turn boundaries under `--max-tokens` (default 32000 for the large model). `--anonymize` strips emails and URLs. `manifest.json` counts rows by task, source, and machine and records the chat template name.
+
+Each task is also its own dataset. Agentic and style keep the 32k budget for the larger model. Review is the set for a separate ~9B review model: `--task review` writes only review SFT and DPO, plus the held-out eval, and defaults to 8192 tokens (raise it toward 16384 if that 9B was trained with a longer context). Diffs keep `--review-context-lines` (default 20) on each side of the comment instead of the whole hunk. `--chat-template` is `qwen3` by default and can be `chatml`, `llama3`, or `gemma`. The messages stay in the OpenAI tool-calling schema; the template name is what Unsloth should apply.
 
 ```bash
 python -m scripts.build_dataset \
@@ -334,6 +336,11 @@ python -m scripts.build_dataset \
   --eval-ratio 0.1
 
 python -m scripts.eval_dataset --eval data/finetune/eval.jsonl --mock-response "No issues."
+
+python -m scripts.build_dataset --task agentic --output-dir data/finetune/agentic --max-tokens 32000
+python -m scripts.build_dataset --task style --output-dir data/finetune/style --max-tokens 32000
+python -m scripts.build_dataset --task review --output-dir data/finetune/review \
+  --chat-template qwen3 --max-tokens 8192 --review-context-lines 20
 ```
 
 The same button is on the **Экспорт** page of `streamlit run viewer/app.py`.

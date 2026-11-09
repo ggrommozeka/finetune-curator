@@ -7,7 +7,8 @@ import argparse
 import json
 from pathlib import Path
 
-from scripts.dataset.build import build_samples, write_dataset
+from scripts.dataset.build import LARGE_MAX_TOKENS, REVIEW_CONTEXT_LINES, REVIEW_MAX_TOKENS, build_samples, write_dataset
+from scripts.dataset.format import CHAT_TEMPLATES
 from scripts.gitlab.signals import load_signal_config
 
 
@@ -18,10 +19,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gitlab-store", default="data/gitlab")
     parser.add_argument("--patterns-store", default="data/patterns", help="Optional machine labels")
     parser.add_argument("--output-dir", default="data/finetune")
+    parser.add_argument("--task", choices=["all", "agentic", "style", "review"], default="all")
+    parser.add_argument("--chat-template", choices=list(CHAT_TEMPLATES), default="qwen3")
     parser.add_argument("--agentic", type=float, default=0.5)
     parser.add_argument("--style", type=float, default=0.25)
     parser.add_argument("--review", type=float, default=0.25)
-    parser.add_argument("--max-tokens", type=int, default=32_000)
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help=f"Per-sample budget. Default {LARGE_MAX_TOKENS} for agentic/style/all, {REVIEW_MAX_TOKENS} for --task review.",
+    )
+    parser.add_argument(
+        "--review-context-lines",
+        type=int,
+        default=REVIEW_CONTEXT_LINES,
+        help="Lines of diff kept on each side of a review anchor. Used by --task review.",
+    )
     parser.add_argument("--chars-per-token", type=float, default=3.0)
     parser.add_argument("--eval-ratio", type=float, default=0.1)
     parser.add_argument("--min-score", type=float, default=0.6, help="Unlabeled sessions at or above this score count as successful")
@@ -36,7 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    tasks = None if args.task == "all" else {args.task}
+    if args.max_tokens is None:
+        args.max_tokens = REVIEW_MAX_TOKENS if args.task == "review" else LARGE_MAX_TOKENS
     ratios = {"agentic": args.agentic, "style": args.style, "review": args.review}
+    if tasks:
+        ratios = {name: (1.0 if name in tasks else 0.0) for name in ratios}
     if sum(ratios.values()) <= 0:
         raise SystemExit("At least one task ratio must be positive.")
     config = load_signal_config(args.config, team_leads=args.team_lead, mrr_pattern=args.mrr_pattern)
@@ -57,6 +76,9 @@ def main(argv: list[str] | None = None) -> None:
         min_score=args.min_score,
         signal_config=config,
         seed=args.seed,
+        tasks=tasks,
+        chat_template=args.chat_template,
+        review_context_lines=args.review_context_lines if args.task == "review" else None,
     )
     written = write_dataset(result, Path(args.output_dir))
     print(json.dumps({"manifest": result["manifest"], "files": written}, ensure_ascii=False, indent=2))

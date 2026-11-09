@@ -7,6 +7,7 @@ Unsloth trains from the ``messages`` list with the tokenizer's Qwen3 template.
 from __future__ import annotations
 
 import json
+import re
 
 from scripts.rules.sessions import estimate_tokens, message_text
 
@@ -73,19 +74,85 @@ def render_tool_call(call: dict) -> str:
     return "\n".join(lines)
 
 
+def _message_body(message: dict) -> str:
+    role = message.get("role") or "user"
+    body = message.get("content") or ""
+    if message.get("tool_calls"):
+        rendered = "\n".join(render_tool_call(call) for call in message["tool_calls"])
+        body = (body + "\n" if body else "") + rendered
+    if role == "tool":
+        body = f"<tool_response>\n{body}\n</tool_response>"
+    return body
+
+
 def render_qwen3(messages: list[dict]) -> str:
     """ChatML rendering Qwen3 tokenizers apply to this message schema."""
+    return render_chat(messages, "qwen3")
+
+
+# Names match Unsloth ``get_chat_template(..., chat_template=name)`` where that family exists.
+CHAT_TEMPLATES = ("qwen3", "chatml", "llama3", "gemma")
+
+
+def render_chat(messages: list[dict], template: str = "qwen3") -> str:
+    """Render messages with a chat template. Qwen3 is the default; other 9B families are selectable."""
+    name = (template or "qwen3").lower()
+    if name not in CHAT_TEMPLATES:
+        raise ValueError(f"Unknown chat template {template!r}. Choose one of: {', '.join(CHAT_TEMPLATES)}")
     blocks = []
     for message in messages:
         role = message.get("role") or "user"
-        body = message.get("content") or ""
-        if message.get("tool_calls"):
-            rendered = "\n".join(render_tool_call(call) for call in message["tool_calls"])
-            body = (body + "\n" if body else "") + rendered
-        if role == "tool":
-            body = f"<tool_response>\n{body}\n</tool_response>"
-        blocks.append(f"{IM_START}{role}\n{body}{IM_END}")
+        body = _message_body(message)
+        if name in {"qwen3", "chatml"}:
+            blocks.append(f"{IM_START}{role}\n{body}{IM_END}")
+        elif name == "llama3":
+            blocks.append(f"<|start_header_id|>{role}<|end_header_id|>\n\n{body}<|eot_id|>")
+        else:
+            blocks.append(f"<start_of_turn>{role}\n{body}<end_of_turn>")
     return "\n".join(blocks) + "\n"
+
+
+_HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+
+
+def clip_diff_context(diff: str, line_start: int | None, line_end: int | None, context_lines: int) -> str:
+    """Keep the diff lines around an anchor. Other lines in the hunk are dropped.
+
+    ``context_lines`` is how many new-file lines to keep on each side of the comment.
+    Without an anchor, only the first hunk and that many body lines are kept.
+    """
+    if not diff or context_lines <= 0:
+        return diff
+    anchor_lo = (line_start or 0) - context_lines if line_start else None
+    anchor_hi = (line_end or line_start or 0) + context_lines if line_start else None
+    kept: list[str] = []
+    header = ""
+    new_line = 0
+    body_kept = 0
+    body_budget = context_lines * 2
+    for line in diff.splitlines():
+        match = _HUNK_HEADER.match(line)
+        if match:
+            header = line
+            new_line = int(match.group(3))
+            body_kept = 0
+            continue
+        if not header:
+            continue
+        numbered = new_line
+        if line.startswith("+") or line.startswith(" "):
+            new_line += 1
+        include = False
+        if anchor_lo is None:
+            include = body_kept < body_budget
+        elif anchor_lo <= numbered <= anchor_hi:
+            include = True
+        if include:
+            if not kept or kept[-1] != header:
+                kept.append(header)
+            kept.append(line)
+            body_kept += 1
+    return "\n".join(kept) if kept else "\n".join(diff.splitlines()[: body_budget + 1])
 
 
 def sequence_tokens(messages: list[dict], chars_per_token: float) -> int:

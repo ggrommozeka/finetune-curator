@@ -7,7 +7,7 @@ from scripts.build_dataset import main as build_main
 from scripts.dataset.build import build_samples
 from scripts.dataset.tasks import from_gitlab_store
 from scripts.dataset.evaluate import review_metrics, style_metrics
-from scripts.dataset.format import render_qwen3, sequence_tokens
+from scripts.dataset.format import clip_diff_context, render_chat, render_qwen3, sequence_tokens
 from scripts.dataset.mix import is_held_out
 from scripts.gitlab.signals import SignalConfig
 from scripts.gitlab.store import GitlabStore
@@ -333,3 +333,48 @@ def test_eval_and_cli(tmp_path: Path):
     assert manifest["train"]["by_task"]["agentic"] == 1
     assert (out / "train.jsonl").read_text(encoding="utf-8").strip()
     assert manifest["chat_template"] == "qwen3"
+
+
+def test_review_export_is_short_and_template_is_selectable(tmp_path: Path):
+    store = _gitlab(tmp_path)
+    store.close()
+    wide = "@@ -1,8 +1,8 @@\n" + "\n".join(f" line{i}" for i in range(1, 8)) + "\n-old\n+new\n"
+    clipped = clip_diff_context(wide, line_start=2, line_end=2, context_lines=1)
+    assert "line1" in clipped
+    assert "line6" not in clipped
+    assert clipped.count("\n") < wide.count("\n")
+    out = tmp_path / "review"
+    build_main(
+        [
+            "--input",
+            str(tmp_path / "missing.jsonl"),
+            "--gitlab-store",
+            str(tmp_path / "gitlab"),
+            "--patterns-store",
+            str(tmp_path / "no-patterns"),
+            "--output-dir",
+            str(out),
+            "--task",
+            "review",
+            "--chat-template",
+            "llama3",
+            "--team-lead",
+            "lead@company.com",
+            "--eval-ratio",
+            "0",
+        ]
+    )
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["chat_template"] == "llama3"
+    assert manifest["max_tokens"] == 8192
+    assert manifest["tasks"] == ["review"]
+    assert "<|start_header_id|>system<|end_header_id|>" in manifest["template_preview"]
+    rows = [json.loads(line) for line in (out / "train.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows
+    assert {row["task"] for row in rows} == {"review"}
+    for row in rows:
+        assert sequence_tokens(row["messages"], 3.0) <= 8192
+    dpo = (out / "train_dpo.jsonl").read_text(encoding="utf-8").strip()
+    assert dpo
+    rendered = render_chat([{"role": "user", "content": "hi"}], "gemma")
+    assert rendered.startswith("<start_of_turn>user\n")
