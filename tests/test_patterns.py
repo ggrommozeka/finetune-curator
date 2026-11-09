@@ -112,15 +112,30 @@ def test_import_dedupes_incremental_and_sqlite_schemas(tmp_path: Path):
                 ],
             }
         ],
-        [{"id": "abc123", "message": "MRR fixes rename", "created_at": "2024-06-01T02:00:00Z"}],
+        [
+            {
+                "id": "abc123",
+                "title": "MRR fixes rename",
+                "message": "MRR fixes rename",
+                "created_at": "2024-06-01T02:00:00Z",
+                "author_email": "lead@company.com",
+                "author_name": "Lead",
+            }
+        ],
         {"abc123": [{"old_path": "a.py", "new_path": "a.py", "diff": "@@ -1,3 +1,3 @@\n a\n-old\n+new\n"}]},
         [],
         project_path="group/app",
     )
-    process_store(gitlab, ["9!3"])
+    from scripts.gitlab.signals import SignalConfig
+
+    process_store(
+        gitlab,
+        ["9!3"],
+        signal_config=SignalConfig(team_leads=("lead@company.com",), mrr_pattern=r"\bmrr\b"),
+    )
     gitlab.close()
     ingested = import_gitlab_traces(store, tmp_path / "gitlab")
-    assert ingested["added"] == 1
+    assert ingested["added"] == 2
     assert any(row["sources"] == ["gitlab"] for row in store.sessions())
     store.close()
 

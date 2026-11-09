@@ -228,9 +228,27 @@ def import_gitlab_traces(store: PatternStore, gitlab_root: Path) -> dict:
     gitlab = GitlabStore(gitlab_root)
     try:
         traces = [trace for trace in gitlab.traces_for() if trace.get("status") == "linked"]
+        polish = [
+            item["record"]
+            for item in gitlab.examples_for()
+            if (item.get("record") or {}).get("source") == "gitlab_polish"
+        ]
     finally:
         gitlab.close()
     records = []
+    for record in polish:
+        gitlab_meta = record.get("gitlab") or {}
+        messages = record.get("messages") or []
+        records.append(
+            {
+                "id": record.get("id"),
+                "title": (gitlab_meta.get("commit_message") or "team-lead polish")[:80],
+                "project": gitlab_meta.get("file") or "gitlab",
+                "created_at": gitlab_meta.get("commit_created_at") or "",
+                "messages": messages,
+                "source_kind": "gitlab_polish",
+            }
+        )
     for trace in traces:
         anchor = trace.get("anchor") or {}
         body = "\n".join(

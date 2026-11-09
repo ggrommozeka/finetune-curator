@@ -279,7 +279,7 @@ python -m scripts.export_gitlab_mrr process \
 
 ## Pattern mining
 
-This is not a replay or A/B harness. It looks across many OpenCode sessions (and linked GitLab review comments, when that store exists) for failures that keep showing up, then recommends either a few general system-prompt rules or a task-specific skill.
+This is not a replay or A/B harness. It looks across many OpenCode sessions and, when the GitLab store exists, both comment-then-fix traces and team-lead polish hunks. It recommends either a few general system-prompt rules or a task-specific skill.
 
 Histories from several machines are imported into `data/patterns/` (gitignored). The same session in two exports is stored once and tagged with every machine. Re-import only adds sessions that were not seen for that source. OpenCode sqlite files are read as `opencode-v2` (session/message/part JSON), `opencode-v1` (role/content columns), or a session blob. Anything else is reported with the table list instead of being guessed.
 
