@@ -33,7 +33,7 @@ def render() -> None:
         until = st.text_input("По дату", key="gl_until", **_widget_value("gl_until", ""))
         fixes_only = st.checkbox("Только с MRR в заголовке", key="gl_fixes", **_widget_value("gl_fixes", False))
         team_leads = st.text_input(
-            "Тимлид (username, имя или email, через запятую)",
+            "Алиасы одного тимлида (username, имя, email)",
             key="gl_leads",
             **_widget_value("gl_leads", ""),
         )
@@ -45,11 +45,7 @@ def render() -> None:
         )
         anonymize = st.checkbox("Анонимизировать примеры", key="gl_anon", **_widget_value("gl_anon", False))
         anonymize_urls = st.checkbox("И URL", key="gl_anon_url", **_widget_value("gl_anon_url", False))
-        process_reviewer = st.text_input(
-            "Обрабатывать только этого ревьюера",
-            key="gl_process_reviewer",
-            **_widget_value("gl_process_reviewer", ""),
-        )
+        st.caption("Обработка сохраняет комментарии всех ревьюеров. Поле «Ревьюер» только фильтрует список.")
 
     root = Path(store_path)
     if not (root / "store.db").exists():
@@ -99,7 +95,6 @@ def render() -> None:
                     stats = process_store(
                         store,
                         targets,
-                        reviewer=process_reviewer or None,
                         fix_pattern=fix_pattern or DEFAULT_FIX_PATTERN,
                         anonymize=anonymize,
                         anonymize_urls=anonymize_urls,
@@ -131,7 +126,7 @@ def render() -> None:
         _render_mr(
             store,
             summary,
-            process_reviewer or None,
+            reviewer or None,
             fix_pattern or DEFAULT_FIX_PATTERN,
             anonymize,
             anonymize_urls,
@@ -167,25 +162,31 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
 
     _render_timeline(bundle, _signal_config(st.session_state.get("gl_leads", ""), fix_pattern))
 
-    traces = store.traces_for(project_id, iid)
+    traces = [
+        trace
+        for trace in store.traces_for(project_id, iid)
+        if _reviewer_matches(trace.get("reviewer") or trace.get("author_username") or "", reviewer)
+    ]
     if traces:
         _render_stats(store.link_stats(project_id, iid), "Этот MR")
         st.markdown("**Цепочка: комментарий → якорь → фикс → код**")
         for trace in traces:
+            st.caption(f"ревьюер {trace.get('reviewer') or trace.get('author_username') or '—'}")
             _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymize_urls)
     else:
         st.markdown("**Комментарии**")
         from scripts.gitlab.link import flatten_notes
 
-        for note in flatten_notes(bundle["discussions"], reviewer):
+        for note in flatten_notes(bundle["discussions"], None):
             author = (note.get("author") or {}).get("username") or ""
+            if not _reviewer_matches(author, reviewer):
+                continue
             st.text(f"{author}: {note.get('body') or ''}")
 
     if st.button("Обработать этот MR", key=f"proc_{project_id}_{iid}"):
         process_store(
             store,
             [summary["ref"]],
-            reviewer=reviewer,
             fix_pattern=fix_pattern,
             anonymize=anonymize,
             anonymize_urls=anonymize_urls,
@@ -193,13 +194,26 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
         )
         st.rerun()
 
-    examples = store.examples_for(project_id, iid)
+    examples = []
+    for item in store.examples_for(project_id, iid):
+        record = item.get("record") or {}
+        if record.get("source") == "gitlab_polish":
+            examples.append(item)
+            continue
+        if _reviewer_matches((record.get("gitlab") or {}).get("reviewer") or "", reviewer):
+            examples.append(item)
     if not examples:
         st.info("Примеров ещё нет. Нажмите «Обработать».")
         return
     st.markdown(f"**Примеры ({len(examples)})**")
     for item in examples:
         _render_example(store, item)
+
+
+def _reviewer_matches(name: str, reviewer: str | None) -> bool:
+    if not reviewer:
+        return True
+    return reviewer.lower() in (name or "").lower()
 
 
 def _signal_config(team_leads: str, pattern: str):

@@ -62,6 +62,8 @@ def anonymize_record(record: dict, anonymizer: Anonymizer) -> dict:
         author = gitlab.get(author_key)
         if isinstance(author, dict) and author:
             gitlab[author_key] = anonymizer.author_view(author)
+    if gitlab.get("reviewer"):
+        gitlab["reviewer"] = anonymizer.author_view({"username": gitlab["reviewer"]}).get("username") or ""
     if gitlab.get("resolved_by"):
         gitlab["resolved_by"] = anonymizer.author_view({"username": gitlab["resolved_by"]}).get("username") or ""
     replies = []

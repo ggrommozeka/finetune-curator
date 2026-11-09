@@ -342,6 +342,7 @@ def trace_thread(
         "note_id": str(note.get("id")),
         "discussion_id": thread.get("discussion_id") or "",
         "author_username": username,
+        "reviewer": username,
         "author_name": author.get("name") or "",
         "author_role": author_role(mr, username),
         "body": str(note.get("body") or "").strip(),
