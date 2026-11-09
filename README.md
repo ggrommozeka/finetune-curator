@@ -1,199 +1,242 @@
 # finetune-curator
 
-Pipeline: **LogMiner export → visual review (keep/discard) → export only approved** for Unsloth / SFT.
+Пайплайн собирает историю работы агента и ревью в GitLab в два набора для дообучения и в правила, которыми агент пользуется сразу.
 
-The same review pass can mine a second artifact: **harness rules** for the agent system prompt or `AGENTS.md` (mistakes, user corrections, loops, tool misuse).
+Две модели:
 
-Works with OpenCode (and other LogMiner sources: Claude Code, Cline, Codex, Qwen) and with merged GitLab merge requests.
+- **Модель A, автор кода, около 27B.** Базовый чекпоинт `Qwen/Qwen3.5-27B`. Учится на успешных траекториях OpenCode, на парах DPO из правок пользователя и на стиле проекта: полировка тимлида и правки после комментария ревьюера. В системный промпт и в `.opencode/skills` рядом с ней кладутся одобренные правила и навыки.
+- **Модель B, ревьюер, около 9B.** Кандидаты: `Qwen/Qwen3.5-9B` (значение по умолчанию) и `deepreinforce-ai/Ornith-1.0-9B` (MIT). Сейчас это этап 1: модель видит уже собранный контекст (дифф, описание MR, связанные задачи, код на базовом коммите, определения символов, одобренные правила) и пишет комментарий. Агентное ревью с инструментами только на чтение — отдельная будущая задача и в этом репозитории не реализовано.
 
-## What you get
+Правила и навыки — третий результат, не третья модель. Правило — короткая императивная инструкция для системного промпта или `AGENTS.md`. Навык — пошаговый сценарий под один тип задачи в формате OpenCode `SKILL.md`. Оба живут в одном файле предложений и проходят одну страницу одобрения.
 
-1. **Export** — thin wrapper around [LogMiner](https://github.com/pearsonkyle/LogMiner) for OpenCode history
-2. **One Streamlit app** — `streamlit run viewer/app.py`. Shared navigation and paths: OpenCode sessions, GitLab MRs, proposals (with clusters), export, and monitoring.
-3. **Export approved** — writes only kept sessions to a clean JSONL ready for Unsloth
-4. **Proposals** — one shared list (`kind`: rule or skill, text, source session ids, status). Per-session generation and GitLab review comments write that same file, and the same viewer page approves them.
-5. **GitLab reviews** — merged MRs become SFT and DPO examples, and linked review comments can be proposed as rules through the shared proposal file.
+Оценка качества LogMiner — структурный фильтр, а не метка «сессия удалась». Решения Keep и одобренные правила стоит просматривать глазами.
 
-The dataset flow is unchanged. Rule files are a separate output.
+## Содержание
 
-## Install
+1. [Цели](#цели)
+2. [Архитектура](#архитектура)
+3. [Установка](#установка)
+4. [Конфигурация](#конфигурация)
+5. [Порядок работы](#порядок-работы)
+6. [Форматы данных](#форматы-данных)
+7. [Приватность](#приватность)
+8. [Устранение неполадок](#устранение-неполадок)
+9. [Частые вопросы](#частые-вопросы)
+10. [Каталог файлов](#каталог-файлов)
+11. [Тесты](#тесты)
+
+## Цели
+
+| Результат | Откуда берётся | Куда кладётся |
+| --- | --- | --- |
+| Модель A, 27B | Удачные сессии OpenCode, правки пользователя, стиль тимлида и правки после комментария | `data/finetune/` или отдельный каталог `--task author` |
+| Модель B, 9B | Комментарии всех ревьюеров и негативные примеры «замечаний нет» | `--task review`, бюджет по умолчанию 8192 токена |
+| Правила | Ошибки сессий, кластеры на трёх и более типах задач, комментарии GitLab | `AGENTS.md` / системный промпт |
+| Навыки | Кластеры, которые не тянут на общее правило | `.opencode/skills/<id>/SKILL.md` |
+
+Локальная машина, под которую написаны профили: две RTX 5060 Ti 16GB (Blackwell, `sm_120`, без NVLink), i9-9900K, 80 ГБ RAM. Ревьюер 9B на ней обучается. Автор 27B в bf16 — только на арендованной A100 или H100 80 ГБ. Домашний профиль 27B — это 4-bit QLoRA на коротких примерах, с обязательным сравнением с базовой моделью.
+
+## Архитектура
+
+Один процесс Streamlit (`streamlit run viewer/app.py`) и один файл предложений. Отдельного второго пайплайна для правил нет. Режим «предложение с одной сессии» (`mode: per-session`) — частный случай: кластер размера 1 или отладка. Корпусный `recommend` пишет в тот же `data/rule_proposals.json` и заменяет такие черновики.
+
+```mermaid
+flowchart TD
+  subgraph machines [Три машины OpenCode]
+    M1[Экспорт JSONL]
+    M2[Экспорт JSONL]
+    M3[Экспорт JSONL или sqlite]
+  end
+  GL[GitLab: sync один раз]
+  Store[(data/gitlab SQLite и сырой JSON)]
+  Patterns[(data/patterns)]
+  Viewer[Streamlit: Сессии, GitLab, Правила, Экспорт, Мониторинг]
+  Props[data/rule_proposals.json]
+  Rules[Правила Markdown и навыки SKILL.md]
+  DS[build_dataset]
+  A[Модель A 27B: траектории, DPO, стиль]
+  B[Модель B 9B: ревью с собранным контекстом]
+
+  M1 --> Viewer
+  M2 --> Patterns
+  M3 --> Patterns
+  GL --> Store
+  Store --> Viewer
+  Store --> Patterns
+  Viewer --> Props
+  Patterns --> Props
+  Props --> Rules
+  Viewer --> DS
+  Store --> DS
+  Patterns --> DS
+  Rules --> DS
+  Rules --> A
+  DS --> A
+  DS --> B
+```
+
+Границы модулей:
+
+| Каталог | Что делает |
+| --- | --- |
+| `scripts/ingest/` | Сессии OpenCode, общий каталог элементов, клиент и офлайн-хранилище GitLab |
+| `scripts/llm/` | Общий клиент OpenAI-совместимого API, адрес сервера, разбор JSON |
+| `scripts/analysis/` | Импорт нескольких машин, аннотация, кластеры, рекомендации, мониторинг |
+| `scripts/proposals/` | Один файл предложений, одобрение, экспорт правил и навыков |
+| `scripts/datasets/` | Задачи agentic / style / review, шаблоны чата, длины, упаковка контекста ревью |
+| `scripts/training/` | Целевые модели, метрики на отложенной выборке, проверка VRAM |
+| `viewer/` | Одно приложение, страницы в `viewer/pages/` |
+
+Команды запуска остаются в корне `scripts/`: `export_opencode`, `export_approved`, `propose_rules`, `export_rules`, `export_gitlab_mrr`, `mine_patterns`, `build_dataset`, `eval_dataset`, `smoke_train`.
+
+## Установка
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-
-# LogMiner (install from git)
 pip install "git+https://github.com/pearsonkyle/LogMiner.git"
 ```
 
-## Quick start
+LogMiner нужен только для выгрузки истории OpenCode. Просмотр, GitLab, правила и сбор датасета работают без него. Тесты сеть не используют.
 
-### 1. Export from OpenCode
+### Blackwell и CUDA
 
-```bash
-# Keep all scores for manual review
-python -m scripts.export_opencode --output data/raw_scored.jsonl --min-score 0.0
-```
-
-OpenCode data is read from `~/.local/share/opencode` by default (override with `--input`).
-
-### 2. Review in the viewer
+На RTX 50 (compute capability `sm_120`) нужен PyTorch, собранный с CUDA 12.8. Колёса CUDA 12.6 и старше ядер `sm_120` не содержат: драйвер может быть новым, а обучение всё равно упадёт. Берите PyTorch 2.7 или новее с индексом `cu128`, затем Unsloth. Triton отдельно не обновляйте: его версия прибита к колесу PyTorch. Если собираете xFormers из исходников, задайте `TORCH_CUDA_ARCH_LIST=12.0`.
 
 ```bash
-streamlit run viewer/app.py -- --input data/raw_scored.jsonl
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install unsloth
 ```
 
-- Filter by score / label
-- Open each trajectory (user / assistant / tool turns)
-- Press **Keep** or **Discard**
-- Optional note per session (why it failed, what the user corrected)
-- Decisions are saved to `data/decisions.json`
+Подробности: [Qwen3.5 в Unsloth](https://unsloth.ai/docs/models/qwen3.5/fine-tune), [несколько GPU](https://unsloth.ai/docs/basics/multi-gpu-training-with-unsloth), [Blackwell](https://unsloth.ai/docs/blog/fine-tuning-llms-with-blackwell-rtx-50-series-and-unsloth).
 
-### 3. Export only approved sessions
+Для предложений правил и оценки отдельный GPU не обязателен: достаточно `llama-server` с GGUF.
+
+## Конфигурация
+
+Секреты и локальные настройки в git не попадают. `data/` и `gitlab.json` в `.gitignore`. Токен в логи и в SQLite не пишется.
+
+### GitLab
 
 ```bash
-python -m scripts.export_approved \
-  --input data/raw_scored.jsonl \
-  --decisions data/decisions.json \
-  --output data/approved.jsonl
+export GITLAB_TOKEN=...          # personal access token, scope api
+export GITLAB_BASE_URL=https://gitlab.company.internal
 ```
 
-Load into Unsloth / HuggingFace:
+`--base-url` перекрывает `GITLAB_BASE_URL`. Для внутреннего УЦ: `--ca-bundle /path/to/company-ca.pem`. `--insecure` отключает проверку TLS. Токен читается только из `GITLAB_TOKEN`.
 
-```python
-from datasets import load_dataset
-import json
+### Один тимлид и признак MRR
 
-ds = load_dataset("json", data_files="data/approved.jsonl", split="train")
-msgs = [json.loads(m) for m in ds[0]["messages"]]
+Тимлид — один человек. В списке его псевдонимы (username, имя, почта), а не несколько разных людей. Сравнение без учёта регистра, по автору и коммитеру.
+
+Скопируйте пример и впишите свои значения. Файл `gitlab.json` не коммитьте.
+
+```bash
+cp gitlab.example.json gitlab.json
 ```
 
-### 4. Propose harness rules
+```json
+{
+  "team_lead": {
+    "aliases": ["team.lead", "lead@company.example"]
+  },
+  "mrr_pattern": "\\bmrr\\b"
+}
+```
 
-Rules are drafted from sessions you discarded, sessions under `--max-score` (default `0.6`, plus LogMiner labels `bad` / `maybe`), and any session with a reviewer note. Each rule is a short imperative instruction, with a category, rationale, source session ids, and a short evidence excerpt. Similar rules are merged.
+Тот же смысл через окружение и флаги. Флаги сильнее окружения, окружение сильнее файла.
 
-Any OpenAI-compatible chat API works. The default endpoint is a local [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`:
+```bash
+export FINETUNE_CURATOR_TEAM_LEADS="team.lead,lead@company.example"
+export FINETUNE_CURATOR_MRR_PATTERN='\bmrr\b'
+```
+
+`--team-lead` можно повторять. `--mrr-pattern` — регулярное выражение без учёта регистра. По умолчанию `\bmrr\b`: заголовок `MRR`, `MRR fixes`, `MRR: ...` помечает полировку стиля. Заголовок не связывает комментарий с коммитом. Связь «комментарий, потом правка» — это более поздний коммит, который задел заякоренные строки.
+
+Коммиты получают роль `author`, `author_fix` (коммит автора после комментария), `team_lead_mrr`, `team_lead_other` или `other`. В обучение попадают комментарии всех ревьюеров. Фильтр `--reviewer` и поле в интерфейсе только сужают просмотр.
+
+### Сервер llama.cpp
+
+Любой OpenAI-совместимый chat API подходит. Значение по умолчанию — локальный [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`:
 
 ```text
 http://localhost:8080/v1
 ```
 
-The API key is optional there. If you omit `--model`, the script uses the only id returned by `GET /v1/models`.
+Ключ для llama-server не нужен. Если `--model` не задан, берётся единственный id из `GET /v1/models`. Имя модели в коде не зашито.
+
+Порядок, от сильного к слабому: флаги `--base-url`, `--api-key`, `--model`, затем `FINETUNE_CURATOR_BASE_URL` / `FINETUNE_CURATOR_API_KEY` / `FINETUNE_CURATOR_MODEL`, затем `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`, затем запись OpenCode (`--from-opencode`), затем `http://localhost:8080/v1`. У адреса без пути дописывается `/v1`. `--print-endpoint` показывает адрес и модель и не печатает ключ.
 
 ```bash
-python -m scripts.propose_rules \
-  --input data/raw_scored.jsonl \
-  --decisions data/decisions.json \
-  --output data/rule_proposals.json \
-  --base-url http://localhost:8080/v1 \
-  --context-budget 170000
-```
+export FINETUNE_CURATOR_BASE_URL=http://127.0.0.1:8080/v1
+export FINETUNE_CURATOR_MODEL=qwen3-27b-q5
+# FINETUNE_CURATOR_API_KEY для llama-server можно не задавать
 
-Smoke-test the command without a server (canned reply, no network):
-
-```bash
-python -m scripts.propose_rules \
-  --input data/raw_scored.jsonl \
-  --decisions data/decisions.json \
-  --output data/rule_proposals.json \
-  --mock-response tests/fixtures/sample_rules_response.txt
-```
-
-### 5. Approve rules in the viewer
-
-Open the viewer as in step 2 and switch the sidebar to **Правила**.
-
-- Edit the rule text and category
-- **Одобрить** / **Отклонить**
-- Session buttons jump back to the source trajectory
-- Decisions are saved to `data/rule_decisions.json` (proposals stay in `data/rule_proposals.json`)
-
-```bash
-streamlit run viewer/app.py -- \
-  --input data/raw_scored.jsonl \
-  --decisions data/decisions.json \
-  --rules data/rule_proposals.json \
-  --rule-decisions data/rule_decisions.json
-```
-
-### 6. Export approved rules
-
-Markdown is grouped by category and ready to paste into a system prompt or `AGENTS.md`. JSON keeps ids, text, category, rationale, source session ids, and evidence. Only **approved** rules are written; edited text wins.
-
-```bash
-python -m scripts.export_rules \
-  --proposals data/rule_proposals.json \
-  --decisions data/rule_decisions.json \
-  --markdown data/approved_rules.md \
-  --json data/approved_rules.json
-```
-
-## Local llama.cpp
-
-The defaults assume a server with about **200k** tokens of context. `--context-budget` (default **170000**) is the usable input budget, leaving room for the instruction prompt and the JSON answer (`--max-output-tokens`, default 4096). Typical OpenCode sessions are sent whole. A session that does not fit is split on message boundaries; short sessions are packed into one request. Lower the budget if `llama-server` was started with a smaller `-c` (for example `--context-budget 12000` on a 16k server).
-
-Token counts are estimated as `characters / --chars-per-token` (default `3`, which over-counts English and stays inside the window). If the server reports a context overflow, lower `--chars-per-token`. Pass `--no-batch` to send every chunk in its own request.
-
-Qwen3-family GGUF quants (for example an Unsloth Q5_K_XL around 27B) emit a `<think>` block unless thinking is disabled. By default this script appends `/no_think` and sends `chat_template_kwargs.enable_thinking=false`. Replies are still scanned and `<think>…</think>` is stripped before JSON parsing. Invalid JSON is retried (`--attempts`, default 3). Temperature defaults to `0.1`. Pass `--think` to allow thinking, or `--no-template-kwargs` if a server rejects the extra body field. The model id is never hardcoded.
-
-```bash
 llama-server \
   -m /path/to/Qwen3-27B-Q5_K_XL.gguf \
   -c 200000 \
   --jinja \
   --host 127.0.0.1 \
   --port 8080
-
-python -m scripts.propose_rules \
-  --input data/raw_scored.jsonl \
-  --decisions data/decisions.json \
-  --output data/rule_proposals.json \
-  --base-url http://127.0.0.1:8080/v1 \
-  --context-budget 170000
 ```
 
-`--jinja` lets llama.cpp apply the GGUF chat template, which is what honors `/no_think` and `enable_thinking`. Check the loaded id with:
+`--jinja` включает шаблон чата из GGUF. Без него `/no_think` и `enable_thinking` не сработают. Бюджет входа `--context-budget` по умолчанию 170000 токенов при контексте сервера около 200k: место остаётся на инструкцию и ответ (`--max-output-tokens`, по умолчанию 4096). Оценка длины — `символы / --chars-per-token` (по умолчанию 3). Для Qwen3 по умолчанию в запрос добавляется `/no_think` и `chat_template_kwargs.enable_thinking=false`, а блоки `<think>` вырезаются перед разбором JSON. Температура 0.1, повторы при плохом JSON — `--attempts` (3). `--think` оставляет рассуждение. `--no-template-kwargs` убирает дополнительное поле, если сервер его отвергает.
 
-```bash
-curl -s http://127.0.0.1:8080/v1/models
-python -m scripts.propose_rules --list-models --base-url http://127.0.0.1:8080/v1
-```
-
-Pin it with `--model <id>` when the server exposes more than one.
-
-## OpenCode provider config
-
-If the model is already configured for OpenCode, pick it by `provider/model`. Project `opencode.json` / `opencode.jsonc` (including `.opencode/`) overrides `~/.config/opencode/opencode.json`. Both the current `providers.*.settings.baseURL` shape and the older `provider.*.options.baseURL` shape are read. `modelID` is what is sent to the API. Keys come from `apiKey` / `api_key` or the provider `env` list.
+Конфиг OpenCode читается из `opencode.json` / `opencode.jsonc` проекта (включая `.opencode/`) и из `~/.config/opencode/opencode.json`. Поддерживаются `providers.*.settings.baseURL` и старый `provider.*.options.baseURL`.
 
 ```bash
 python -m scripts.propose_rules --list-opencode-models
 python -m scripts.propose_rules --print-endpoint --from-opencode llama/qwen3-27b
-
-python -m scripts.propose_rules \
-  --input data/raw_scored.jsonl \
-  --decisions data/decisions.json \
-  --from-opencode llama/qwen3-27b
+python -m scripts.propose_rules --list-models --base-url http://127.0.0.1:8080/v1
 ```
 
-Override order, highest first: CLI flags (`--base-url`, `--api-key`, `--model`), then `FINETUNE_CURATOR_BASE_URL` / `FINETUNE_CURATOR_API_KEY` / `FINETUNE_CURATOR_MODEL`, then `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`, then the OpenCode entry, then the llama-server default base URL. A base URL with no path gets `/v1` appended.
+## Порядок работы
+
+Команды ниже рассчитаны на три машины с OpenCode и один self-hosted GitLab. Имена `laptop-a`, `laptop-b`, `desktop-c` — метки источника, их можно заменить.
+
+### 1. Выгрузить OpenCode на каждой машине
+
+На каждой машине, в копии репозитория или просто с установленным LogMiner:
 
 ```bash
-export FINETUNE_CURATOR_BASE_URL=http://127.0.0.1:8080/v1
-export FINETUNE_CURATOR_MODEL=qwen3-27b-q5
-# FINETUNE_CURATOR_API_KEY is optional for llama-server
+python -m scripts.export_opencode \
+  --output data/raw_scored.jsonl \
+  --min-score 0.0
 ```
 
-`--print-endpoint` shows the resolved model and base URL and never prints the key.
+Каталог по умолчанию — `~/.local/share/opencode`. Другой путь: `--input`. `--min-score 0` оставляет все оценки для ручного просмотра. Другие источники LogMiner: `--source claude|cline|codex|qwen`.
 
-## GitLab merge-request reviews
+Скопируйте три JSONL на машину, где будете смотреть и обучать, под разными именами, например `data/laptop-a.jsonl`, `data/laptop-b.jsonl`, `data/desktop-c.jsonl`. В git их не кладите. Если JSONL нет, импорт читает sqlite напрямую: путь без суффикса `.jsonl` считается базой OpenCode. Импорт понимает `opencode-v2` (JSON в part), `opencode-v1` (колонки role/content) и blob сессии. Незнакомая схема не угадывается: команда печатает список таблиц.
 
-Company review history stays on disk. Phase 1 talks to GitLab. Phase 2 never does.
+Поле `model` сессии сохраняется, если оно есть в базе: словарь `providerID` / `modelID` или строка `provider/model`.
 
-**Phase 1 — sync.** Pull merged MRs (description, discussions with inline positions, commits, diffs, and file text at the commit and its parent when GitLab returns it) into `data/gitlab/` (SQLite plus raw JSON, gitignored). Re-running skips MRs already stored. `--refresh project!iid` refetches one MR. The token is `GITLAB_TOKEN` and is not printed or written into the store.
+### 2. Свести истории в одно хранилище паттернов
+
+Одинаковая сессия в двух выгрузках хранится один раз и помечается всеми машинами. Повторный импорт добавляет только новые сессии этого источника.
 
 ```bash
-export GITLAB_TOKEN=...   # api scope. Do not commit it.
+python -m scripts.mine_patterns import --source laptop-a --input data/laptop-a.jsonl
+python -m scripts.mine_patterns import --source laptop-b --input data/laptop-b.jsonl
+python -m scripts.mine_patterns import --source desktop-c --input ~/.local/share/opencode/opencode.db
+```
+
+Последняя команда показывает прямой импорт sqlite: любой `--input` не на `.jsonl` открывается как база. Хранилище паттернов — `data/patterns/` (в gitignore). Одинаковое содержимое получает id `s_` и 16 символов хеша, поэтому повтор в двух выгрузках не создаёт вторую сессию, а только дописывает метку машины. Следы GitLab добавляются в конце шага 3, после офлайн-обработки.
+
+Страница **Сессии** читает одну JSONL, не склад паттернов. Склейте файлы, если смотрите все три машины в одном окне:
+
+```bash
+cat data/laptop-a.jsonl data/laptop-b.jsonl data/desktop-c.jsonl > data/raw_scored.jsonl
+```
+
+### 3. Синхронизировать GitLab и обработать офлайн
+
+Фаза 1 ходит в GitLab. Фаза 2 — нет.
+
+Синхронизация забирает слитые MR: описание, обсуждения с якорями строк, коммиты, диффы, текст файлов на коммите и на родителе, снимок файлов на базовом SHA (`side=base`) и текст задач, на которые ссылается описание (`#N`, `issues/N`). Всё лежит в `data/gitlab/` (SQLite `store.db` и сырой JSON). Повторный запуск пропускает уже сохранённые MR. `--refresh project!iid` перекачивает один MR.
+
+```bash
+export GITLAB_TOKEN=...
 python -m scripts.export_gitlab_mrr sync \
   --base-url https://gitlab.company.internal \
   --ca-bundle /path/to/company-ca.pem \
@@ -201,28 +244,20 @@ python -m scripts.export_gitlab_mrr sync \
   --since 2025-01-01 \
   --until 2026-01-01
 
-# later, only new MRs are fetched
 python -m scripts.export_gitlab_mrr sync \
   --base-url https://gitlab.company.internal \
   --group my-group
 
-# re-fetch one MR
 python -m scripts.export_gitlab_mrr sync \
   --base-url https://gitlab.company.internal \
   --refresh group/app!42
 ```
 
-`--project group/app` (repeatable) limits the sync to specific projects. `--insecure` disables TLS verification.
+`--project group/app` можно повторять.
 
-Comments from every reviewer are stored, with the author's role on the MR (author, reviewer, assignee, or commenter). `--reviewer` is an optional exact filter, not the default.
+У каждого комментария есть якорь: SHA `base` / `start` / `head`, путь, старый и новый диапазон строк, фрагмент текста. Статус связи: `linked` (уверенность 0.8, или 0.9 если тред закрыт), `addressed_elsewhere` (тот же файл, строки не пересеклись, 0.55), `not_addressed`, `unclear`. Ручная связь хранится отдельно и перекрывает автоматическую. Комментарий без якоря на строку с коммитом не связывается.
 
-Each comment keeps its anchor: diff SHAs (`base` / `start` / `head`), file path, old and new line range, and the snippet those lines pointed at. A comment fix is any later commit that touches those lines. The commit title is not used. Threads remember whether they were resolved, by whom, and the replies. Status is `linked` (with a confidence), `addressed_elsewhere`, `not_addressed`, or `unclear`.
-
-There is one team lead. `gitlab.json` names that person once and lists their aliases (`team_lead.aliases`: usernames, names, emails). `--team-lead` adds another alias of the same person. Every commit by that identity becomes a before/after hunk pair. Review comments are stored with the reviewer who wrote them. Processing keeps every reviewer in the training examples; `--reviewer` and the viewer field only filter what you look at. Titles matching `mrr_pattern` (default `\bmrr\b`, so `MRR`, `MRR fixes`, and `MRR: ...`) are flagged as the primary polish, not as the comment fix. Other commits are classified per MR as `author`, `author_fix` (author commit after a review comment), `team_lead_mrr`, `team_lead_other`, or `other`.
-
-**Phase 2 — process offline.** Pick MRs in the viewer (**GitLab** page of `streamlit run viewer/app.py`: filter by project, author, reviewer, date, MRR titles, comment count) or on the CLI. The MR page is one timeline of commits and comments. Team-lead commits are highlighted, MRR titles are marked, and each hunk has a before/after view. Comment traces still show the anchored lines and the later commit that changed them. A manual link is stored separately and overrides automatic linking. Copy `gitlab.example.json` to `gitlab.json` for that one team lead and the MRR regex. A linked comment is the earliest later commit on the same lines (confidence 0.8, or 0.9 when the thread is resolved). The same file with no line overlap is `addressed_elsewhere` (confidence 0.55).
-
-Examples and keep/discard edits are stored in separate tables from the raw MR, so you can process again without fetching. `--anonymize` strips author names and emails from examples only; `--anonymize-urls` also replaces URLs. The raw store is left intact.
+Обработка считает примеры и не ходит в сеть. `--anonymize` заменяет имена и почты в примерах на `dev-N`. `--anonymize-urls` дополнительно заменяет URL. Сырой склад не меняется. Повторная обработка не затирает ваши Keep / Discard.
 
 ```bash
 python -m scripts.export_gitlab_mrr list --fixes-only
@@ -235,9 +270,7 @@ python -m scripts.export_gitlab_mrr process \
 python -m scripts.export_gitlab_mrr process --all
 ```
 
-In the viewer, open an MR (description, comments, diffs), keep or discard each example, and edit the training text. Decisions survive a re-process of the same MR.
-
-Export writes only `keep` rows unless you pass `--status`. SFT uses the Unsloth `messages` JSONL. DPO uses `prompt` / `chosen` / `rejected` (rejected is the code before the fix).
+Отдельный экспорт только GitLab-примеров (не общий датасет двух моделей):
 
 ```bash
 python -m scripts.export_gitlab_mrr export \
@@ -246,18 +279,7 @@ python -m scripts.export_gitlab_mrr export \
   --dpo data/gitlab_dpo.jsonl
 ```
 
-Optional rule proposal uses the same LLM path as session rules and does not call GitLab. `--mock-response` skips the network entirely:
-
-```bash
-python -m scripts.export_gitlab_mrr process \
-  --mr group/app!42 \
-  --rules \
-  --mock-response tests/fixtures/sample_rules_response.txt
-```
-
-Approve those rules on the **Правила** page. `gitlab_review` is not part of the default session sources.
-
-Smoke-test both phases with the recorded fixture:
+Проверка без сети, на записанном ответе API:
 
 ```bash
 GITLAB_TOKEN=example python -m scripts.export_gitlab_mrr sync \
@@ -265,115 +287,183 @@ GITLAB_TOKEN=example python -m scripts.export_gitlab_mrr sync \
   --project group/app \
   --fixture tests/fixtures/gitlab_api.json \
   --store /tmp/gitlab-store
-
-python -m scripts.export_gitlab_mrr process \
-  --store /tmp/gitlab-store \
-  --mr group/app!7 \
-  --reviewer teamlead \
-  --anonymize
 ```
 
-## Pattern mining
-
-This is not a replay or A/B harness. It looks across many OpenCode sessions and, when the GitLab store exists, both comment-then-fix traces and team-lead polish hunks. It recommends either a few general system-prompt rules or a task-specific skill.
-
-Histories from several machines are imported into `data/patterns/` (gitignored). The same session in two exports is stored once and tagged with every machine. Re-import only adds sessions that were not seen for that source. OpenCode sqlite files are read as `opencode-v2` (session/message/part JSON), `opencode-v1` (role/content columns), or a session blob. Anything else is reported with the table list instead of being guessed.
+Следы GitLab попадают в кластеризацию так:
 
 ```bash
-python -m scripts.mine_patterns import --source laptop-a --input data/laptop-a.jsonl
-python -m scripts.mine_patterns import --source laptop-b --db ~/.local/share/opencode/opencode.db
 python -m scripts.mine_patterns import --source gitlab --gitlab-store data/gitlab
+```
 
+### 4. Открыть одно приложение Streamlit
+
+```bash
+streamlit run viewer/app.py -- \
+  --input data/raw_scored.jsonl \
+  --decisions data/decisions.json \
+  --rules data/rule_proposals.json \
+  --rule-decisions data/rule_decisions.json \
+  --gitlab-store data/gitlab \
+  --patterns-store data/patterns
+```
+
+Пять страниц, одни и те же пути:
+
+| Страница | Зачем |
+| --- | --- |
+| Сессии | Траектория, оценка, модель-источник, Keep / Discard, заметка |
+| GitLab | Список MR, таймлайн коммитов и комментариев, до/после ханка, ручная связь |
+| Правила | Кластеры и предложения: править текст, одобрить или отклонить, открыть сессию или комментарий |
+| Экспорт | Одобренные сессии, правила, навыки и датасеты обеих моделей |
+| Мониторинг | Метрики до и после версии правил, откат |
+
+Решения сессий пишутся в `data/decisions.json` и не смешиваются с сырым JSONL. Решения по примерам GitLab лежат в отдельных таблицах склада.
+
+### 5. Аннотация и паттерны
+
+Аннотация — один JSON на сессию: тип задачи, проект, инструменты, исход, где сломалось, как поправил пользователь, что сработало. Готовые сессии пропускаются. `--refresh` считает заново.
+
+Кластеры: эмбеддинги, если заданы `--embeddings-url` и `--embeddings-model`, иначе косинус по TF-IDF. Меньше `--min-size` (по умолчанию 3) — шум, рекомендация не строится. `--min-size 1` оставляет одиночные сессии для отладки.
+
+Рекомендация становится **правилом**, только если в кластере не меньше трёх типов задач. Иначе это **навык**. Конфликты с уже существующим текстом правила и с тем же типом ошибки на успешных сессиях сохраняются в предложении.
+
+```bash
 python -m scripts.mine_patterns annotate --base-url http://127.0.0.1:8080/v1
 python -m scripts.mine_patterns cluster --min-size 3
 python -m scripts.mine_patterns recommend --base-url http://127.0.0.1:8080/v1
 ```
 
-Annotation is one JSON object per session (task type, project, tools, outcome, where it failed, how the user corrected it, what worked). It is cached, so a second run skips finished sessions. Clustering uses an OpenAI-compatible embeddings endpoint when `--embeddings-url` and `--embeddings-model` are set, and TF-IDF cosine otherwise. Clusters smaller than `--min-size` (default 3) are noise and are not recommended.
+`annotate` и `recommend` принимают `--mock-response` с готовым JSON, без сети. Фильтр ревьюера на кластерах — только просмотр. В обучающие примеры по-прежнему входят все ревьюеры.
 
-A pattern becomes a **rule** only when it spans at least three task types. Otherwise it becomes a **skill**: `.opencode/skills/<id>/SKILL.md` is the portable layout (YAML `name` and `description`, then steps and examples). Conflicts with existing rule text and with the same error type on successful sessions are stored on the proposal.
+Черновик с одной сессии, если корпус ещё не собран:
 
-`recommend` writes into `data/rule_proposals.json`, the same file per-session `propose_rules` uses (`mode: per-session` drafts are replaced). Approve, edit, or reject them on the **Правила** page of `streamlit run viewer/app.py`. That page also lists clusters (frequency, failure rate, machines, example sessions) and opens the OpenCode session or the GitLab comment. The **Мониторинг** page shows before/after metrics and rollback. `--min-size 1` keeps single-session clusters for debugging.
+```bash
+python -m scripts.propose_rules \
+  --input data/raw_scored.jsonl \
+  --decisions data/decisions.json \
+  --output data/rule_proposals.json \
+  --base-url http://localhost:8080/v1 \
+  --context-budget 170000
+```
 
-Export of approved rules and skills is `export_rules` (Markdown, JSON, and `--skills-dir`). `mine_patterns export` calls that same writer, then records the version used by `report` and `rollback`.
+В черновик попадают сессии Discard, сессии с оценкой не выше `--max-score` (0.6) или меткой LogMiner `bad` / `maybe`, и сессии с заметкой. Похожие формулировки сливаются. Без сервера:
+
+```bash
+python -m scripts.propose_rules \
+  --input data/raw_scored.jsonl \
+  --decisions data/decisions.json \
+  --output data/rule_proposals.json \
+  --mock-response tests/fixtures/sample_rules_response.txt
+```
+
+### 6. Одобрить правила и навыки
+
+На странице **Правила** поправьте текст и категорию, нажмите одобрить или отклонить. Статусы и правки — в `data/rule_decisions.json`. Исходные предложения остаются в `data/rule_proposals.json`. Идентификатор — хеш категории и нормализованного текста: повторное одобрение той же формулировки сохраняет решение. Правка текста в интерфейсе id не меняет.
+
+Экспорт пишет только одобренное. Отредактированный текст побеждает. Правила попадают в Markdown и JSON. Навыки в Markdown правил не попадают: у них отдельные каталоги OpenCode.
+
+```bash
+python -m scripts.export_rules \
+  --proposals data/rule_proposals.json \
+  --decisions data/rule_decisions.json \
+  --markdown data/approved_rules.md \
+  --json data/approved_rules.json \
+  --skills-dir .opencode/skills
+```
+
+`mine_patterns export` вызывает тот же писатель и запоминает версию для отчёта и отката:
 
 ```bash
 python -m scripts.mine_patterns export \
   --rules-md data/patterns_rules.md \
   --rules-json data/patterns_rules.json \
-  --skills-dir skills \
+  --skills-dir .opencode/skills \
   --version v1
-
-python -m scripts.mine_patterns report --decisions data/decisions.json --error-type loop
-python -m scripts.mine_patterns rollback --version v1
 ```
 
-Export records the file versions and the adoption time. The report compares sessions dated before and after that time: mean LogMiner score, discard rate, how often the cluster's error type comes back, and how often the user had to correct the agent. Rollback copies that version's files back and retires later versions. There is no replay loop.
+Положите Markdown в системный промпт или `AGENTS.md`. Навыки OpenCode подхватывает из `.opencode/skills/<id>/SKILL.md` и из `~/.config/opencode/skills`. Упаковщик ревью модели B добавляет одобренный текст правил коротким разделом соглашений, если `data/rule_proposals.json` на месте.
 
-`annotate` and `recommend` accept `--mock-response` for a canned JSON reply. The default live endpoint is the same llama-server client as rule proposal (`http://localhost:8080/v1`, thinking off, low temperature).
+### 7. Собрать датасет под каждую модель
 
-## One fine-tuning dataset
+`build_dataset` читает JSONL OpenCode и локальный склад GitLab. Отложенная доля (`--eval-ratio`, по умолчанию 0.1) режется по идентификатору сессии или по `mr:project!iid`. Одна сессия и один MR не оказываются сразу в train и в eval.
 
-`build_dataset` reads the OpenCode JSONL and the local GitLab store and writes one Unsloth chat dataset. Three tasks share that file:
+Задачи:
 
-- **Agentic.** Approved sessions (`keep`) and unlabeled sessions at or above `--min-score` become multi-turn tool-calling conversations. A later user message is treated as a correction: the training trajectory drops the rejected step, and a DPO pair stores that step as `rejected` and the following assistant step as `chosen`.
-- **Style.** Team-lead commits (MRR titles and the lead's other commits) and comment-then-fix pairs become "rewrite this code following project conventions" samples. The code before the edit is the DPO `rejected` completion; the code after is `chosen`.
-- **Review.** A diff hunk is the input and the review comment, from every reviewer, is the output, with a suggested fix when the comment was linked to one. Hunks nobody commented on are negatives whose target is `No issues.`
+- **agentic.** Сессии Keep и неразмеченные с оценкой не ниже `--min-score` (0.6). Многоходовой диалог с вызовами инструментов. Поздняя реплика пользователя считается правкой: из SFT выпадает отвергнутый шаг, в DPO он становится `rejected`, а следующий ответ ассистента — `chosen`.
+- **style.** Коммиты тимлида (и MRR, и остальные) и пары «комментарий, потом правка». Вход — «перепиши по правилам проекта». Код до правки — `rejected`, после — `chosen`.
+- **review.** Ханк и комментарий любого ревьюера, плюс правка, если комментарий связан. Ханки без комментариев — негативные примеры, цель ровно `No issues.`
 
-Agentic and style target the Qwen3-family 27B served with llama.cpp (about 200k tokens of context at inference). Their export defaults to the Qwen3 chat template and OpenAI-style tool calls (`tool_calls` on the assistant turn, `tool` role for the result). `<think>` blocks are stripped by default so the file matches a server started with thinking off. `--thinking keep` leaves the blocks in place; use that only if inference also leaves thinking on. Training length is `--max-tokens` (default 32000). A session longer than that is cut on turn boundaries, and each piece repeats the system prompt and the first user message.
+`--task author` — это agentic и style для модели A. `--task review` — только модель B. `--task all` смешивает три задачи весами `--agentic`, `--style`, `--review`.
 
-`--agentic`, `--style`, and `--review` are mixing weights for `--task all`. Held-out rows are chosen by session id or MR id, so one session or MR never appears in both `train.jsonl` and `eval.jsonl`. `--anonymize` strips emails and URLs. `manifest.json` counts rows by task, source, and machine and records `chat_template`, `thinking`, and `target_model`.
+Длина модели A по умолчанию 32000 токенов. Сессия длиннее режется по границам реплик; в каждом куске повторяются системный промпт и первое сообщение пользователя. `<think>` вырезается (`--thinking strip`). `--thinking keep` оставляет блоки: тогда и на инференсе рассуждение должно быть включено.
 
-Each task is also its own dataset. `--task agentic` and `--task style` stay on the 27B defaults above. Review is the set for a separate ~9B review model: `--task review` writes only review SFT and DPO, plus the held-out eval, and defaults to 8192 tokens. Diffs keep `--review-context-lines` (default 20) on each side of the comment instead of the whole hunk. `--chat-template` can be `chatml`, `llama3`, or `gemma` for that smaller model. The messages stay in the OpenAI tool-calling schema; the template name is what Unsloth should apply.
+Модель B по умолчанию укладывает контекст в 8192 токена. Приоритет, сверху вниз: дифф, текст MR, связанные задачи, функция на базовом коммите, определения и места вызова, одобренные правила. Не влезший раздел, кроме диффа, выбрасывается. Дифф подрезается. Вокруг комментария остаётся `--review-context-lines` строк (20).
+
+Шаблоны `--chat-template`: `qwen3` (по умолчанию), `qwen3.5`, `chatml`, `llama3`, `gemma`. Для Qwen3 и Qwen3.5 сообщения — ChatML и вызовы `<tool_call>`. `gemma` имеет смысл для чекпоинта на базе Gemma, не для 9B Ornith: 9B Ornith — гибрид Qwen3.5, более крупные Ornith дополнительно дообучены на Gemma 4.
+
+Модель-источник сессии OpenCode фильтруется и взвешивается. Вес не выбрасывает остальные, а оставляет предпочитаемые раньше при перемешивании.
 
 ```bash
 python -m scripts.build_dataset \
+  --task author \
   --input data/raw_scored.jsonl \
   --decisions data/decisions.json \
   --gitlab-store data/gitlab \
   --patterns-store data/patterns \
-  --output-dir data/finetune \
-  --agentic 0.5 --style 0.25 --review 0.25 \
+  --output-dir data/finetune/author \
+  --chat-template qwen3 \
+  --thinking strip \
   --max-tokens 32000 \
-  --eval-ratio 0.1
+  --base-model Qwen/Qwen3.5-27B \
+  --source-model claude \
+  --model-weight claude=3 \
+  --anonymize --anonymize-urls
 
-python -m scripts.eval_dataset --eval data/finetune/eval.jsonl --mock-response "No issues."
-
-python -m scripts.build_dataset --task agentic --output-dir data/finetune/agentic \
-  --chat-template qwen3 --thinking strip --max-tokens 32000
-python -m scripts.build_dataset --task style --output-dir data/finetune/style \
-  --chat-template qwen3 --thinking strip --max-tokens 32000
-python -m scripts.build_dataset --task review --output-dir data/finetune/review \
-  --chat-template qwen3 --max-tokens 8192 --review-context-lines 20
+python -m scripts.build_dataset \
+  --task review \
+  --input data/raw_scored.jsonl \
+  --gitlab-store data/gitlab \
+  --output-dir data/finetune/review \
+  --chat-template qwen3 \
+  --max-tokens 8192 \
+  --review-context-lines 20 \
+  --base-model Qwen/Qwen3.5-9B \
+  --anonymize
 ```
 
-The same controls are on the **Экспорт** page of `streamlit run viewer/app.py`.
+Те же переключатели есть на странице **Экспорт**. `--profile` подставляет из JSON задачу, вариант, бюджет и базовую модель, пока вы не перекрыли их флагами.
 
-### This machine
-
-Local box: two RTX 5060 Ti 16GB cards (Blackwell, `sm_120`), no NVLink, i9-9900K, 80GB RAM. The 9B reviewer can be trained here. The 27B author cannot. Do not train the 27B by offloading layers to that 80GB of system RAM.
-
-| Profile | Model | Where | Method | GPUs | Seq | Unsloth training memory | Fits here? |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `reviewer-qlora-1x16gb` | 9B | local | 4-bit QLoRA | 1x 16GB | 8192 | weights about 6.5GB; training is higher and can fill the card | yes, batch 1, if it does not OOM |
-| `reviewer-bf16-2x16gb` | 9B | local | bf16 LoRA, `device_map="balanced"` | 2x 16GB | 8192 | about 22GB | yes, sharded; neither card may pass 16GB |
-| `author-bf16-1x80gb` | 27B | rented A100 or H100 80GB | bf16 LoRA | 1x 80GB | 32768 | about 56GB | no on the local GPUs |
-| `author-qlora-2x16gb` | 27B | local | 4-bit QLoRA, sharded, short samples | 2x 16GB | 4096 | 4-bit weights about 17GB plus training | aimed at both cards; smoke-test before a real run |
-
-Unsloth's published bf16 LoRA figures are 22GB (9B) and 56GB (27B). The 6.5GB 9B number is their 4-bit inference size, not a training measurement. 4-bit training of Qwen3.5 is the quality risk described below. Configs are in `configs/train/`.
-
-Blackwell needs a PyTorch build that contains `sm_120` kernels. That is a CUDA 12.8 wheel (`cu128`), PyTorch 2.7 or newer. Wheels built with CUDA 12.6 or older do not include `sm_120` and fail even if the driver is new. Unsloth's [Blackwell guide](https://unsloth.ai/docs/blog/fine-tuning-llms-with-blackwell-rtx-50-series-and-unsloth) says `pip install unsloth` is enough on a current environment, and the CUDA toolkit should be 12.8 or newer. Do not upgrade `triton` by itself; each PyTorch wheel pins the Triton it was built with. If you compile xFormers from source, set `TORCH_CUDA_ARCH_LIST=12.0`.
+Домашний 27B берёт короткий вариант сам из профиля: пары стиля и пошаговый DPO с обрезанным недавним контекстом. Полные траектории в этот файл не входят.
 
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-pip install unsloth
+python -m scripts.build_dataset \
+  --profile configs/train/author-qlora-2x16gb.json \
+  --input data/raw_scored.jsonl \
+  --decisions data/decisions.json \
+  --gitlab-store data/gitlab \
+  --output-dir data/finetune/author-home
 ```
 
-### 9B reviewer, on the two 16GB cards
+В каталоге появляются `train.jsonl`, `eval.jsonl`, `train_dpo.jsonl`, `eval_dpo.jsonl`, `manifest.json`.
 
-Candidates are `Qwen/Qwen3.5-9B` and `deepreinforce-ai/Ornith-1.0-9B` (MIT). The 9B Ornith checkpoint is a Qwen3.5 hybrid; larger Ornith models are also post-trained on Gemma 4. Use `--chat-template gemma` only for a Gemma-based checkpoint. The review sample budget defaults to 8192 tokens. Raise `--max-tokens` only if the profile still fits.
+### 8. Обучить
 
-**One GPU, 4-bit QLoRA** (`configs/train/reviewer-qlora-1x16gb.json`). [Unsloth does not recommend this for Qwen3.5](https://unsloth.ai/docs/models/qwen3.5/fine-tune), dense or MoE, because the quantization gap is larger than usual. It is here only because one 16GB card cannot hold bf16 LoRA. Train with batch size 1, gradient accumulation 8, and `use_gradient_checkpointing="unsloth"`. Before keeping the adapter, serve the base model and the adapter on two ports and compare them on the same held-out MRs:
+Unsloth для Qwen3.5 не рекомендует 4-bit QLoRA ни для dense, ни для MoE: зазор квантизации больше обычного. Точный рецепт — bf16 LoRA, около 22 ГБ для 9B и около 56 ГБ для 27B. Отдельной страницы Qwen3.8, которая советовала бы 4-bit, нет, поэтому 27B идёт по тому же bf16-рецепту. 4-bit ниже — осознанный запасной путь на 16 ГБ, его нельзя считать основным.
+
+| Профиль | Модель | Где | Метод | GPU | Длина | Память обучения | На этих двух картах |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `reviewer-qlora-1x16gb` | 9B | дома | 4-bit QLoRA | 1×16 ГБ | 8192 | веса около 6.5 ГБ, обучение выше | да, batch 1, если не кончится память |
+| `reviewer-bf16-2x16gb` | 9B | дома | bf16 LoRA, `device_map="balanced"` | 2×16 ГБ | 8192 | около 22 ГБ | да, шарды; ни одна карта не выше 16 ГБ |
+| `author-bf16-1x80gb` | 27B | аренда A100/H100 80 ГБ | bf16 LoRA | 1×80 ГБ | 32768 | около 56 ГБ | нет |
+| `author-qlora-2x16gb` | 27B | дома | 4-bit QLoRA, короткие примеры | 2×16 ГБ | 4096 (от 2048) | 4-bit веса около 17 ГБ плюс обучение | цель — обе карты; сначала smoke-тест |
+
+6.5 ГБ — это оценка Unsloth для 4-bit инференса 9B, не замер обучения. Конфиги лежат в `configs/train/`.
+
+Веса на CPU не выгружаются. У 4-bit bitsandbytes такой сброс отвергает. `use_gradient_checkpointing="unsloth"` может держать пересчитанные активации в закреплённой RAM. Это не то же самое, что слои модели в системной памяти.
+
+Шард `device_map="balanced"` — один процесс. Не запускайте его через `torchrun` или `accelerate launch`. DDP кладёт полную копию на каждую карту, а Unsloth не принимает `device_map` внутри distributed. NVLink нет, обмен идёт по PCIe, обучение медленнее.
+
+**9B, одна карта, 4-bit** — `configs/train/reviewer-qlora-1x16gb.json`. Batch 1, накопление градиента 8, checkpointing `unsloth`. Адаптер оставляйте только если на одной и той же отложенной выборке он не хуже базы по precision, recall и доле ложных срабатываний:
 
 ```bash
 python -m scripts.eval_dataset \
@@ -381,11 +471,11 @@ python -m scripts.eval_dataset \
   --models configs/train/reviewer-compare.json
 ```
 
-Keep the adapter only if precision, recall, and the false-positive rate are not worse than the base model.
-
-**Both GPUs, bf16 LoRA** (`configs/train/reviewer-bf16-2x16gb.json`). This is the quality path. Unsloth shards a model that does not fit on one GPU with `device_map="balanced"` in a single process ([multi-GPU guide](https://unsloth.ai/docs/basics/multi-gpu-training-with-unsloth)). Do not start it with `torchrun` or `accelerate launch`. DDP puts a full copy on every GPU, and a 22GB bf16 LoRA does not fit in 16GB. `device_map="balanced"` is also rejected inside that distributed mode. The cards have no NVLink, so the shard traffic goes over PCIe and training is slower. There is no CPU offload in this profile. If one card runs out of memory, shorten `max_seq_length`.
+**9B, обе карты, bf16** — `configs/train/reviewer-bf16-2x16gb.json`. Это основной локальный путь по качеству.
 
 ```python
+from unsloth import FastLanguageModel
+
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="Qwen/Qwen3.5-9B",
     max_seq_length=8192,
@@ -405,11 +495,9 @@ model = FastLanguageModel.get_peft_model(
 )
 ```
 
-Use `per_device_train_batch_size=1` and `gradient_accumulation_steps=8`.
+`per_device_train_batch_size=1`, `gradient_accumulation_steps=8`. Если карта переполняется, уменьшите `max_seq_length` в JSON.
 
-### 27B author, on a rented 80GB GPU
-
-Train `Qwen/Qwen3.5-27B` on one rented A100 80GB or H100 80GB with bf16 LoRA (`configs/train/author-bf16-1x80gb.json`). Unsloth's figure for that run is about 56GB, which fits in 80GB and does not fit in 32GB of local GPU memory. Do not run this bf16 recipe on the two 16GB cards, and do not offload the 27B weights onto the 80GB of system RAM. The at-home profile below is a separate, lower-quality 4-bit run.
+**27B на аренде** — `configs/train/author-bf16-1x80gb.json`, одна A100 80 ГБ или H100 80 ГБ, bf16 LoRA, длина 32768. На двух локальных 16 ГБ этот рецепт не запускайте и веса 27B в 80 ГБ RAM не сбрасывайте. После обучения скачайте адаптер, слейте или переведите в GGUF и раздавайте его дома через llama.cpp. Арендованная карта нужна только на время обучения.
 
 ```python
 model, tokenizer = FastLanguageModel.from_pretrained(
@@ -421,28 +509,17 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 )
 ```
 
-The rest of the LoRA and `SFTTrainer` setup matches the 9B block, with `max_length=32768` and the author JSONL. There is no separate Qwen3.8 training page that recommends 4-bit, so this 27B uses the Qwen3.5 bf16 recipe. After training, download the adapter, merge or convert it to GGUF, and serve that file on the local machine with llama.cpp. The rented GPU is only for the training run.
+Дальше тот же LoRA и `SFTTrainer`, `max_length=32768`, JSONL автора. DPO — `train_dpo.jsonl` (`prompt`, `chosen`, `rejected` — списки сообщений) и `DPOTrainer` с тем же шаблоном.
 
-### 27B at home
+**27B дома** — `configs/train/author-qlora-2x16gb.json`. 4-bit QLoRA, `device_map="balanced"`, длина по умолчанию 4096 и диапазон 2048–4096, ранг LoRA 8–16, `target_modules` правится в файле. Batch 1, накопление 16, оптимизатор `paged_adamw_8bit`. Датасет — вариант `short`: стиль и пошаговый DPO, без длинных траекторий. Это не замена арендованного bf16.
 
-`configs/train/author-qlora-2x16gb.json` trains the same 27B without a rental. It is 4-bit QLoRA sharded with `device_map="balanced"` across both 16GB cards. Sequences are 4096 tokens by default and may be set from 2048 to 4096. LoRA rank defaults to 8 and may be 8–16. `target_modules` lists the attention and MLP projections and can be edited in the file. Unsloth gradient checkpointing keeps the recomputed activations in pinned system RAM. The 4-bit weights stay on the GPUs. bitsandbytes rejects a 4-bit device map that spills weights to CPU, and this profile does not ask for that. Batch size is 1, gradient accumulation is 16, and the optimizer is paged 8-bit AdamW.
-
-The dataset variant is `short`. It keeps style pairs (team-lead polish and comment-then-fix, before and after) and step-level DPO pairs (the rejected agent step against the step after the user correction). The DPO prompt is only the most recent turns that fit. Full successful trajectories are left out, so this run does not teach long tool-calling sessions.
+Перед длинным прогоном:
 
 ```bash
-python -m scripts.build_dataset \
-  --profile configs/train/author-qlora-2x16gb.json \
-  --input data/raw_scored.jsonl \
-  --decisions data/decisions.json \
-  --gitlab-store data/gitlab \
-  --output-dir data/finetune/author-home
-
 python -m scripts.smoke_train --profile configs/train/author-qlora-2x16gb.json --steps 2
 ```
 
-The smoke test loads the checkpoint, runs those steps at the configured length, and prints peak MiB on each GPU and tokens per second. If `fits` is false, shorten `max_seq_length` before a real run. `--simulate` checks the profile and does not load weights.
-
-Qwen3.5 4-bit QLoRA is the quality risk Unsloth warns about, and short samples cannot replace the 32k trajectory training on the rented GPU. Do not serve this adapter until it has been compared with the base model on the same held-out file:
+Команда грузит чекпоинт, делает два шага на полной длине и печатает пик MiB по каждой GPU и токены в секунду. Если `fits` ложный, укоротите `max_seq_length`. `--simulate` только проверяет профиль и веса не грузит. Сравнение с базой обязательно:
 
 ```bash
 python -m scripts.eval_dataset \
@@ -451,11 +528,7 @@ python -m scripts.eval_dataset \
   --models configs/train/author-home-compare.json
 ```
 
-DPO uses `train_dpo.jsonl` (`prompt`, `chosen`, and `rejected` are message lists) with TRL's `DPOTrainer` and the same template. If the export was built with `--thinking keep`, do not disable thinking at serve time.
-
-Two ways to serve the result with llama.cpp:
-
-Merged GGUF, produced by Unsloth in the same quant family as the Q5_K_XL already in use:
+Раздача результата llama.cpp. Слитый GGUF:
 
 ```python
 model.save_pretrained_gguf("outputs/qwen3.5-27b-gguf", tokenizer, quantization_method="q5_k_m")
@@ -465,7 +538,7 @@ model.save_pretrained_gguf("outputs/qwen3.5-27b-gguf", tokenizer, quantization_m
 llama-server -m outputs/qwen3.5-27b-gguf/model.gguf --jinja -c 200000 --host 127.0.0.1 --port 8080
 ```
 
-Or keep a base GGUF and attach the adapter. Save the LoRA, convert it with llama.cpp's `convert_lora_to_gguf.py`, and load it beside the base model:
+Или базовый GGUF плюс адаптер:
 
 ```python
 model.save_pretrained("outputs/qwen3.5-27b-lora")
@@ -478,9 +551,17 @@ llama-server -m qwen3.5-27b-q5_k_xl.gguf --lora adapter.gguf --jinja -c 200000 \
   --host 127.0.0.1 --port 8080
 ```
 
-`--jinja` applies the Qwen3 chat template stored in the GGUF, including tool calls. A dataset built with `--thinking strip` should be served with thinking disabled (`chat_template_kwargs.enable_thinking` false, or the server's equivalent). A dataset built with `--thinking keep` should leave thinking on.
+Датасет со `--thinking strip` раздавайте с выключенным рассуждением. Датасет со `--thinking keep` — с включённым.
 
-Score one server with `python -m scripts.eval_dataset --eval data/finetune/eval.jsonl`. To compare several base or fine-tuned checkpoints on the same held-out MR rows, pass a JSON file. Each entry is a llama-server (or any OpenAI-compatible server) or a canned reply for a dry run:
+### 9. Оценить
+
+Один сервер:
+
+```bash
+python -m scripts.eval_dataset --eval data/finetune/eval.jsonl
+```
+
+Несколько баз и адаптеров на одних и тех же отложенных MR. Каждая запись — OpenAI-совместимый сервер или canned-ответ `mock` для сухого прогона:
 
 ```json
 [
@@ -493,66 +574,255 @@ Score one server with `python -m scripts.eval_dataset --eval data/finetune/eval.
 ```bash
 python -m scripts.eval_dataset \
   --eval data/finetune/review/eval.jsonl \
-  --models data/finetune/review/models.json
+  --models configs/train/reviewer-compare.json
 ```
 
-Model A reports the user-correction rate (completions closer to the uncorrected step than to the corrected one) and the review-comment rate on the code it wrote. Model B, for every listed model, reports comment match precision/recall and the false-positive rate on hunks that passed review with no comments. Add `--judge` to let a server decide whether a predicted review matches the real comment.
+Модель A: доля поправок пользователя (ответ ближе к отвергнутому шагу, чем к исправленному) и доля ревью-комментариев на написанный код. Для первой метрики нужен `--eval-dpo` (по умолчанию `eval_dpo.jsonl` рядом с `--eval`).
 
-Approved rules and skills stay the harness next to Model A: export them with `export_rules` and put the rules in the system prompt or `.opencode/skills`. The review packer also inserts the approved rule text as a short conventions section when `data/rule_proposals.json` is present.
+Модель B: precision и recall совпадения с реальным комментарием и доля ложных срабатываний на ханках, где целью было `No issues.` `--judge` просит тот же сервер решить, совпал ли предсказанный комментарий с настоящим.
 
-Stage 2 for Model B is a later change: agentic review with read-only tools, distilled from 27B review trajectories that match real comments and are approved in the viewer. This export is stage 1 only, with the context already assembled.
+Без сети: `--mock-response "No issues."`.
 
-## Layout
+### 10. Мониторинг и откат
+
+Экспорт запоминает версии файлов и время, когда правила начали использовать. Отчёт сравнивает сессии до и после: средняя оценка LogMiner, доля Discard, как часто возвращается тип ошибки кластера, как часто пользователь поправлял агента. Откат копирует файлы той версии обратно и снимает более поздние. Повторного прогона агента по старым сессиям нет.
+
+```bash
+python -m scripts.mine_patterns report --decisions data/decisions.json --error-type loop
+python -m scripts.mine_patterns rollback --version v1
+```
+
+Та же картина на странице **Мониторинг**.
+
+## Форматы данных
+
+Каталог `data/` локальный. Ниже — формы, которые читает и пишет код.
+
+### Сессия OpenCode, JSONL
+
+Одна строка — один объект LogMiner. Обязательны сообщения. Оценка, метка и модель необязательны.
+
+```json
+{
+  "id": "session-id",
+  "score": 0.82,
+  "label": "good",
+  "model": {"providerID": "anthropic", "modelID": "claude-sonnet"},
+  "messages": [
+    {"role": "user", "content": "Поправь парсер"},
+    {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+        {"id": "call-1", "type": "function", "function": {"name": "read", "arguments": "{\"path\": \"parser.py\"}"}}
+      ]
+    },
+    {"role": "tool", "tool_call_id": "call-1", "content": "..."}
+  ]
+}
+```
+
+Модель может быть строкой `provider/model`. Если поля нет, сессия всё равно берётся, но в манифесте по моделям не учитывается.
+
+### Решения по сессиям
+
+`data/decisions.json`:
+
+```json
+{
+  "labels": {"session-id": "keep"},
+  "notes": {"session-id": "зациклился на одном тесте"}
+}
+```
+
+`labels`: `keep` или `discard`. Старый файл-словарь «id → keep|discard» тоже читается.
+
+### Предложения и решения по правилам
+
+`data/rule_proposals.json`, версия 2. `kind` — `rule` или `skill`. `mode` — `per-session` или `corpus`. `source` — `opencode` или `gitlab`.
+
+```json
+{
+  "version": 2,
+  "proposals": [
+    {
+      "id": "hash",
+      "kind": "rule",
+      "text": "После правки запусти тесты затронутого модуля.",
+      "category": "verification",
+      "rationale": "Сессии бросали правку без прогона.",
+      "session_ids": ["session-id"],
+      "evidence": "короткая цитата",
+      "steps": [],
+      "examples": [],
+      "conflicts": [],
+      "mode": "corpus",
+      "cluster_id": "c12",
+      "source": "opencode"
+    }
+  ]
+}
+```
+
+У навыка заполнены `title`, `description`, `steps`, `examples`. `data/rule_decisions.json`:
+
+```json
+{
+  "statuses": {"hash": "approved"},
+  "edits": {"hash": {"text": "новая формулировка", "category": "verification"}}
+}
+```
+
+Статусы: `approved`, `rejected`, `pending`.
+
+Навык на диске — каталог `<skills-dir>/<id>/SKILL.md` с YAML `name` и `description`, затем шаги и примеры, плюс `skill.json` рядом.
+
+### Склад GitLab
+
+`data/gitlab/store.db` и сырой JSON по MR. Таблицы сырых данных отделены от примеров, решений Keep/Discard, ролей коммитов и ручных связей. У файла есть `side`: текст на коммите и `base` — снимок на базовом SHA. `issues.json` рядом с сырым MR — текст связанных задач.
+
+Роли коммитов: `author`, `author_fix`, `team_lead_mrr`, `team_lead_other`, `other`. Статусы связи комментария: `linked`, `addressed_elsewhere`, `not_addressed`, `unclear`.
+
+### Паттерны
+
+`data/patterns/store.db`. Сессии нескольких машин, аннотации, кластеры, снимки версий экспорта для отката.
+
+### Датасет Unsloth
+
+SFT, одна строка JSONL:
+
+```json
+{
+  "id": "…",
+  "task": "agentic",
+  "source": "opencode",
+  "machine": "laptop-a",
+  "group": "session-id",
+  "kind": "trajectory",
+  "messages": [{"role": "system", "content": "…"}, {"role": "user", "content": "…"}]
+}
+```
+
+DPO: те же поля плюс `prompt`, `chosen`, `rejected`. Каждый из трёх — список сообщений, не строка.
+
+`manifest.json` хранит `chat_template`, `tool_format`, `thinking`, `target` (`author` или `reviewer`), `base_model`, `base_model_candidates`, `train_precision`, `variant` (`full` или `short`), `target_model`, бюджет, доли и для train/eval счётчики `by_task`, `by_source`, `by_machine`, `by_source_model`.
+
+Короткий домашний вариант помечает пошаговые пары как `correction-step`. Стили остаются `polish`, `polish-other`, `comment-fix`.
+
+## Приватность
+
+- Не коммитьте `data/`. В ignore входят `data/*.jsonl`, `data/*.json`, `data/*.md`, `data/gitlab/`, `data/patterns/`, `data/finetune/`, кэш GitLab. Исключение — пустой `data/.gitkeep`.
+- Не коммитьте `gitlab.json`, `.env` и токен. `GITLAB_TOKEN` читается из окружения, в склад и в stdout не пишется. `--print-endpoint` тоже не печатает ключ API.
+- Сырой ответ GitLab может содержать почту и имена. `--anonymize` действует на опубликованные примеры и обучающие строки, не на сырой HTTP-кэш. Имена и почты становятся `dev-N`, при `--anonymize-urls` ещё и URL. Для датасета те же флаги есть у `build_dataset`. Поле ревьюера в записи тоже псевдонимизируется.
+- Одобренные правила и навыки могут цитировать внутренние детали. Просмотрите их до того, как класть Markdown в общий репозиторий.
+- Тесты ходят только в фикстуры. Сеть для GitLab и модели им не нужна.
+
+## Устранение неполадок
+
+**LogMiner не найден.** `pip install "git+https://github.com/pearsonkyle/LogMiner.git"`. Обёртка пробует `python -m logminer`, затем команду `logminer`.
+
+**После обновления OpenCode экспорт пустой или схема не читается.** Проверьте `opencode --version`. Импорт sqlite понимает v2, v1 и blob. Другие таблицы он перечисляет и останавливается, а не угадывает колонки. Пересоберите JSONL.
+
+**Сервер отвечает context overflow.** Уменьшите `--context-budget` под флаг `-c` у `llama-server`. Если оценка слишком оптимистична, уменьшите `--chars-per-token`. `--no-batch` шлёт каждый кусок отдельно.
+
+**В JSON правил попадает `<think>` или разбор падает.** Запускайте `llama-server` с `--jinja`. Не передавайте `--think`, если хотите пустой блок рассуждения. Скрипт вырезает теги и повторяет запрос до `--attempts`.
+
+**Сервер отвергает тело запроса.** `--no-template-kwargs`.
+
+**`GET /v1/models` вернул несколько id.** Задайте `--model` или `FINETUNE_CURATOR_MODEL`.
+
+**GitLab 401 или пустой sync.** Экспортируйте `GITLAB_TOKEN` со scope `api` и проверьте `--base-url`. Для своего УЦ нужен `--ca-bundle`, не `--insecure`, если сертификат можно проверить.
+
+**429 или 503.** Клиент ждёт `Retry-After` и повторяет. Долгий лимит просто растягивает sync.
+
+**Комментарий не связался с MRR-коммитом.** Так и задумано. MRR — метка полировки по заголовку. Связь комментария ищет поздний коммит по заякоренным строкам. Комментарий без якоря остаётся несвязанным. Ручную связь задайте на странице MR, она переживает повторный `process`.
+
+**В обучение попал не тот человек как тимлид.** В `gitlab.json` должен быть один объект `team_lead.aliases`. Лишний псевдоним другого человека расширяет стиль-выборку. Проверьте `FINETUNE_CURATOR_TEAM_LEADS`: окружение перекрывает файл.
+
+**`import` GitLab ничего не добавил.** Сначала `process`, потом `mine_patterns import --source gitlab --gitlab-store data/gitlab`. Без следов и полировки добавлять нечего.
+
+**Кластеры пустые.** Одинаковый текст сессий схлопывается по хешу содержимого. Нужны разные сессии и `--min-size`, который они набирают. Аннотация без сервера требует `--mock-response`.
+
+**Streamlit ругается на виджет.** Значение по умолчанию пишется в session state только если ключа ещё нет. Запускайте одно приложение, не старые отдельные страницы: их больше нет.
+
+**CUDA на RTX 50: no kernel image.** Поставьте колесо `cu128` (PyTorch 2.7+). Колесо CUDA 12.6 `sm_120` не содержит. Triton не обновляйте отдельно от этого PyTorch.
+
+**bf16 9B не влезает, или Unsloth отвергает `device_map`.** Запускайте один процесс с `device_map="balanced"`. `torchrun` здесь не используется. Если одна карта всё равно переполняется, уменьшите `max_seq_length`.
+
+**4-bit 27B падает с ошибкой про CPU или disk.** Веса должны остаться на двух GPU. Профиль `author-qlora-2x16gb` запрещает сброс весов. Укоротите последовательность или освободите вторую карту. Smoke-тест сам завершается, если карта устройства показывает `cpu`, `disk` или `meta`.
+
+**Домашний 27B «не выучил» длинные сессии.** Вариант `short` их не содержит. Длинные траектории — профиль `author-bf16-1x80gb` на арендованной карте 80 ГБ.
+
+**Оценка без сервера падает с просьбой задать модель.** Либо поднимите llama-server и `FINETUNE_CURATOR_MODEL`, либо передайте `--mock-response` или JSON с полем `mock`.
+
+## Частые вопросы
+
+**Почему две модели, а не одна 27B на всё?** Ревью на 9B дешевле гонять на каждом MR, и ему хватает собранного контекста в 8k. Авторскому агенту нужны длинные траектории с инструментами и окно около 200k на инференсе. Смешивать это в одном чекпоинте не требуется.
+
+**Почему правила не запекаются в веса и одновременно попадают в датасет ревью?** Правила — это сменный harness: их правят без дообучения и откатывают файлом. В пакете ревью они ещё и короткий раздел соглашений, чтобы 9B видела те же договорённости.
+
+**Чем правило отличается от навыка?** Правило одно на много типов задач (порог — три типа в кластере) и живёт в системном промпте. Навык — шаги и примеры одного узкого сценария в `SKILL.md`. Оба одобряются на одной странице.
+
+**Зачем режим per-session, если есть кластеры?** Чтобы получить черновик до того, как сведены три машины. `recommend` по корпусу эти черновики заменяет. Одиночный кластер остаётся для отладки (`--min-size 1`).
+
+**Почему заголовок MRR не считается исправлением комментария?** MRR — метка полировки тимлида. Исправление комментария — любой поздний коммит, который трогает заякоренные строки, кем бы он ни был сделан. Иначе связь зависит от формулировки заголовка и теряет правки без слова MRR.
+
+**Почему тимлид один, а ревьюеров много?** Стиль проекта снимается с одного человека и его псевдонимов. Замечания на ревью собираются со всех: в склад, в трассировку и в `--task review`. Фильтр ревьюера нужен только когда вы смотрите кластер или MR.
+
+**Можно ли учить 27B дома в bf16, сбросив слои в 80 ГБ RAM?** Нет. Профиль этого не делает. bf16 27B — арендованные 80 ГБ видеопамяти. Дома — 4-bit на обеих картах и короткие примеры, с обязательным сравнением с базой.
+
+**Почему QLoRA помечен как риск, хотя конфиг есть?** Unsloth прямо не рекомендует 4-bit для Qwen3.5. Конфиги `reviewer-qlora-1x16gb` и `author-qlora-2x16gb` существуют, потому что bf16 на одну или две карты 16 ГБ не встаёт. Адаптер не раздавайте, пока `eval_dataset` на той же отложенной выборке не показал, что он не хуже базы.
+
+**Что такое этап 2 ревьюера?** Позже: агентное ревью с инструментами только на чтение, дистилляция из траекторий 27B, которые совпали с живыми комментариями и одобрены в интерфейсе. Текущий `--task review` — этап 1, контекст уже собран.
+
+**Как не протекает отложенная выборка?** Группа — id сессии или `mr:project!iid`. Режется группа целиком, а не отдельные реплики одного MR.
+
+**Зачем вес `--model-weight claude=3`?** В манифесте видно, какая модель написала траекторию. Вес оставляет предпочитаемые модели впереди при наборе доли. `--source-model` наоборот отбрасывает сессии, в подписи модели которых нет этой строки.
+
+**Где смотреть до и после правил?** Страница Мониторинг или `mine_patterns report`. Откат — `mine_patterns rollback --version v1`. Это возврат файлов, не переигрывание сессий.
+
+## Каталог файлов
 
 ```
 finetune-curator/
 ├── README.md
 ├── requirements.txt
-├── .gitignore
+├── gitlab.example.json          # образец тимлида и regex MRR
+├── configs/train/               # профили 9B и 27B
 ├── scripts/
-│   ├── export_opencode.py       # LogMiner wrapper
-│   ├── export_approved.py       # Keep-only JSONL export
-│   ├── propose_rules.py         # per-session proposals
-│   ├── export_rules.py          # approved rules and skills
-│   ├── export_gitlab_mrr.py     # GitLab sync / process / export
-│   ├── mine_patterns.py         # annotate, cluster, recommend
-│   ├── build_dataset.py         # author and reviewer datasets
-│   ├── eval_dataset.py          # held-out metrics
-│   ├── smoke_train.py           # local VRAM fit check
-│   ├── llm/                     # shared chat client, endpoint, JSON parsing
-│   ├── ingest/opencode_sessions.py
-│   ├── ingest/catalog.py        # one item model for sessions and MRs
-│   ├── ingest/gitlab/           # client, store, sync, linking, anonymize
-│   ├── analysis/                # clusters, recommendations, monitoring
-│   ├── proposals/               # one proposal file, approval, export
-│   ├── datasets/                # tasks, templates, mixing, context packing
-│   └── training/                # targets, eval, smoke test
+│   ├── export_opencode.py
+│   ├── export_approved.py
+│   ├── propose_rules.py
+│   ├── export_rules.py
+│   ├── export_gitlab_mrr.py
+│   ├── mine_patterns.py
+│   ├── build_dataset.py
+│   ├── eval_dataset.py
+│   ├── smoke_train.py
+│   ├── llm/                     # общий chat-клиент
+│   ├── ingest/                  # OpenCode, каталог, GitLab
+│   ├── analysis/                # кластеры и мониторинг
+│   ├── proposals/               # один файл предложений
+│   ├── datasets/                # сборка JSONL
+│   └── training/                # цели, метрики, smoke-тест
 ├── viewer/
 │   ├── app.py                   # streamlit run viewer/app.py
-│   ├── shared.py                # navigation, paths, widgets
-│   └── pages/                   # sessions, gitlab, proposals, export, monitoring
-├── configs/train/               # bf16 and at-home QLoRA profiles
+│   ├── shared.py
+│   └── pages/                   # Сессии, GitLab, Правила, Экспорт, Мониторинг
 ├── tests/
-└── data/                        # local only (gitignored)
+└── data/                        # только локально
 ```
 
-`scripts/rules/llm.py` still exposes `request_rules`, `chat_complete`, and `thinking_controls`. New code should call the chat helpers from `scripts.llm` and keep rule prompts in `scripts.proposals`.
+`scripts/rules/llm.py` по-прежнему отдаёт `request_rules`, `chat_complete` и `thinking_controls`. Новый код берёт чат из `scripts.llm`, а промпт правил оставляет в `scripts.proposals`.
 
-## Tests
+## Тесты
 
 ```bash
 python -m pytest
 ```
 
-The suite covers merge, JSON parsing (thinking tags included), chunking and batching, decision files, both export formats, OpenCode config resolution, a mocked end-to-end `propose_rules` → `export_rules` run, the GitLab exporter against a recorded API fixture, pattern mining, and the dataset builder (including the simulated at-home smoke test). It does not call a live model or a live GitLab.
+Покрыты слияние правил, JSON вместе с тегами рассуждения, нарезка длинных сессий, файлы решений, оба экспорта, разбор конфига OpenCode, цепочка `propose_rules` → `export_rules` на canned-ответе, GitLab по записанной фикстуре, кластеры и сборщик датасета, включая имитацию домашнего smoke-теста. Живой GitLab и живая модель не вызываются.
 
-## Notes
-
-- LogMiner quality score is a **structural filter**, not a success label. Always spot-check Keep decisions and approved rules.
-- After OpenCode CLI upgrades (v1 → v2 schema), re-run export; if parse fails, check `opencode --version` and DB tables.
-- Do not commit real session logs or exported rules if they may contain secrets. `data/*.jsonl`, `data/*.json`, and `data/*.md` are gitignored.
-- Rule ids are a hash of the category and the normalized text, so approving the same merged wording again keeps the decision. Editing text in the viewer does not change the id.
-
-## License
+## Лицензия
 
 MIT
