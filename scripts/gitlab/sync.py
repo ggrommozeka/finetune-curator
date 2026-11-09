@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import urllib.parse
 from datetime import datetime
 
-from scripts.gitlab.client import quote_id
+from scripts.gitlab.client import GitLabError, quote_id
 from scripts.gitlab.anonymize import Anonymizer
 from scripts.gitlab.export import list_merge_requests
 from scripts.gitlab.link import DEFAULT_FIX_PATTERN
@@ -31,15 +32,32 @@ def _diff_paths(diff: dict) -> list[str]:
     return paths
 
 
-_ISSUE_REF = re.compile(r"(?:#|issues/)(\d+)")
+_LOG = logging.getLogger(__name__)
+# Cross-project ``group/project#123`` before a bare ``#123`` or ``issues/123``.
+_ISSUE_REF = re.compile(
+    r"(?P<path>[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+)#(?P<iid>\d+)|(?:#|issues/)(?P<local>\d+)"
+)
+
+
+def linked_issue_refs(*texts: str) -> list[tuple[str, str]]:
+    """Issue references from MR title and description.
+
+    Each item is ``(project_path, iid)``. An empty project path means the MR's own project.
+    """
+    found: list[tuple[str, str]] = []
+    for text in texts:
+        for match in _ISSUE_REF.finditer(text or ""):
+            iid = match.group("iid") or match.group("local")
+            path = match.group("path") or ""
+            item = (path, iid)
+            if item not in found:
+                found.append(item)
+    return found
 
 
 def linked_issue_iids(text: str) -> list[str]:
-    found = []
-    for iid in _ISSUE_REF.findall(text or ""):
-        if iid not in found:
-            found.append(iid)
-    return found
+    """Same-project issue iids. Cross-project refs are not included."""
+    return [iid for path, iid in linked_issue_refs(text) if not path]
 
 
 def _base_sha(mr: dict, commits: list[dict]) -> str:
@@ -107,17 +125,20 @@ def fetch_bundle(client, mr: dict, *, project_path: str | None = None) -> dict:
                 continue
             files.append({"sha": base, "path": path, "side": "base", "content": content})
     issues = []
-    for iid in linked_issue_iids(str(mr.get("description") or "")):
+    for issue_path, issue_iid in linked_issue_refs(str(mr.get("title") or ""), str(mr.get("description") or "")):
+        project_ref: str | int = quote_id(issue_path) if issue_path else project_id
         try:
             _status, _headers, payload = client.request_json(
-                "GET", f"/api/v4/projects/{project_id}/issues/{iid}"
+                "GET", f"/api/v4/projects/{project_ref}/issues/{issue_iid}"
             )
-        except Exception:
+        except GitLabError as exc:
+            _LOG.warning("linked issue %s#%s was not stored: %s", issue_path or project_id, issue_iid, exc)
             continue
         if isinstance(payload, dict):
             issues.append(
                 {
-                    "iid": payload.get("iid") or iid,
+                    "iid": payload.get("iid") or issue_iid,
+                    "project_path": issue_path,
                     "title": payload.get("title") or "",
                     "description": payload.get("description") or "",
                 }
@@ -217,15 +238,14 @@ def sync_store(
 
 
 def _path_from_web(mr: dict) -> str:
+    """Project path between the host and ``/-/merge_requests/``, including nested groups."""
     web = str(mr.get("web_url") or "")
     marker = "/-/merge_requests/"
     if marker not in web:
         return ""
-    left = web.split(marker, 1)[0].rstrip("/")
-    parts = urllib.parse.unquote(left).split("/")
-    if len(parts) >= 2:
-        return "/".join(parts[-2:])
-    return ""
+    left = web.split(marker, 1)[0]
+    path = urllib.parse.unquote(urllib.parse.urlparse(left).path).strip("/")
+    return path
 
 
 def _split_refresh(ref: str) -> tuple[str, int]:
@@ -310,7 +330,6 @@ def process_store(
     store: GitlabStore,
     refs: list[str],
     *,
-    reviewer: str | None = None,
     fix_pattern: str = DEFAULT_FIX_PATTERN,
     line_pad: int = 2,
     max_chars: int = 8000,
@@ -319,24 +338,30 @@ def process_store(
     signal_config: SignalConfig | None = None,
     complete_fn=None,
 ) -> dict:
-    """Phase 2. Reads the store only and replaces example rows for each MR."""
+    """Phase 2. Reads the store only and replaces example rows for each MR.
+
+    Every reviewer's comments are stored. A reviewer filter belongs on list and
+    the viewer, not on this write path.
+    """
+    from scripts.gitlab.classify import classify_commits
+    from scripts.gitlab.examples import apply_anonymization
+    from scripts.gitlab.export import records_from_traces
+    from scripts.gitlab.polish import build_polish_records
+    from scripts.gitlab.signals import load_signal_config
+    from scripts.gitlab.trace import build_traces
+
     totals = {"merge_requests": 0, "examples": 0, "comments": 0, "file_line": 0, "file": 0, "mr": 0, "unlinked": 0}
     for ref in refs:
         project_id, iid = store.resolve_ref(ref)
         bundle = store.load_bundle(project_id, iid)
         if bundle is None:
             raise KeyError(ref)
-        from scripts.gitlab.export import records_from_traces
-        from scripts.gitlab.trace import build_traces
-
         overrides = store.overrides_for(project_id, iid)
         traces = build_traces(
             bundle["discussions"],
             bundle["commits"],
             bundle["diffs_by_sha"],
             bundle["mr"],
-            reviewer=reviewer,
-            fix_pattern=fix_pattern,
             line_pad=line_pad,
             files=bundle.get("files") or [],
             overrides=overrides,
@@ -344,10 +369,6 @@ def process_store(
         if anonymize or anonymize_urls:
             traces = _anonymize_traces(traces, strip_urls=anonymize_urls)
         store.replace_traces(project_id, iid, traces)
-        from scripts.gitlab.classify import classify_commits
-        from scripts.gitlab.polish import build_polish_records
-        from scripts.gitlab.signals import SignalConfig, load_signal_config
-
         config = signal_config or load_signal_config(mrr_pattern=fix_pattern)
         roles = classify_commits(bundle["commits"], bundle["mr"], bundle["discussions"], config)
         store.replace_roles(project_id, iid, roles)
@@ -362,8 +383,6 @@ def process_store(
             complete_fn=complete_fn,
         )
         if anonymize or anonymize_urls:
-            from scripts.gitlab.examples import apply_anonymization
-
             polish = apply_anonymization(polish, strip_urls=anonymize_urls)
         records.extend(polish)
         stats["polish"] = len(polish)

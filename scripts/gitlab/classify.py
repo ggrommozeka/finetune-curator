@@ -32,7 +32,7 @@ def _message(commit: dict) -> str:
 
 def first_review_time(discussions: list | None) -> object | None:
     earliest = None
-    for thread in iter_threads(discussions or [], None):
+    for thread in iter_threads(discussions or []):
         moment = _moment(str(thread["root"].get("created_at") or ""))
         if moment is None:
             continue

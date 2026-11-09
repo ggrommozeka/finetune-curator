@@ -31,7 +31,11 @@ def render() -> None:
         reviewer = st.text_input("Ревьюер", key="gl_reviewer", **_widget_value("gl_reviewer", ""))
         since = st.text_input("С даты", key="gl_since", **_widget_value("gl_since", ""))
         until = st.text_input("По дату", key="gl_until", **_widget_value("gl_until", ""))
-        fixes_only = st.checkbox("Только с MRR в заголовке", key="gl_fixes", **_widget_value("gl_fixes", False))
+        fixes_only = st.checkbox(
+            "Только со связанными комментариями",
+            key="gl_fixes",
+            **_widget_value("gl_fixes", False),
+        )
         team_leads = st.text_input(
             "Алиасы одного тимлида (username, имя, email)",
             key="gl_leads",
@@ -76,12 +80,14 @@ def render() -> None:
             reviewer=reviewer,
             since=since,
             until=until,
-            fixes_only=fixes_only,
+            linked_only=fixes_only,
             min_comments=int(min_comments or 0),
-            fix_pattern=fix_pattern or DEFAULT_FIX_PATTERN,
         )
         labels = {
-            row["ref"]: f"{row['ref']}  {row['title']}  ({row['comment_count']} notes, {row['fix_count']} fixes)"
+            row["ref"]: (
+                f"{row['ref']}  {row['title']}  "
+                f"({row['comment_count']} notes, {row['linked_count']} linked, {row['mrr_count']} MRR)"
+            )
             for row in rows
         }
         with st.sidebar:
@@ -148,7 +154,7 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
         <div class="hero">
           <p class="hero-title">!{iid} {_esc(summary['title'])}</p>
           <p class="hero-sub">{_esc(summary['author_username'])} · { _esc(summary['merged_at'] or '—') }
-          · {summary['comment_count']} comments · {summary.get('lead_count', 0)} team-lead · {summary['fix_count']} MRR titles</p>
+          · {summary['comment_count']} comments · {summary.get('linked_count', 0)} linked · {summary.get('mrr_count', 0)} team-lead MRR</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -249,7 +255,7 @@ def _render_timeline(bundle: dict, config) -> None:
                 "hunks": hunks,
             }
         )
-    for thread in iter_threads(bundle["discussions"], None):
+    for thread in iter_threads(bundle["discussions"]):
         note = thread["root"]
         events.append(
             {

@@ -11,7 +11,6 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from scripts.gitlab.link import DEFAULT_FIX_PATTERN, is_fix_message
 from scripts.gitlab.trace import author_role, extract_anchor, snippet_for_anchor, summarize_traces
 
 SCHEMA = """
@@ -126,6 +125,16 @@ CREATE TABLE IF NOT EXISTS commit_roles (
   author_email TEXT,
   created_at TEXT,
   PRIMARY KEY (project_id, mr_iid, sha)
+);
+CREATE TABLE IF NOT EXISTS issues (
+  project_id INTEGER NOT NULL,
+  mr_iid INTEGER NOT NULL,
+  issue_iid INTEGER NOT NULL,
+  project_path TEXT NOT NULL DEFAULT '',
+  title TEXT,
+  description TEXT,
+  raw_json TEXT NOT NULL,
+  PRIMARY KEY (project_id, mr_iid, project_path, issue_iid)
 );
 CREATE TABLE IF NOT EXISTS link_overrides (
   project_id INTEGER NOT NULL,
@@ -339,6 +348,7 @@ class GitlabStore:
                     """,
                     (project_id, item["sha"], item["path"], item["side"], item.get("content") or ""),
                 )
+            self._replace_issues(project_id, iid, issues or [])
 
     def _write_raw(self, project_id: int, iid: int, name: str, payload) -> None:
         path = self.raw_root / str(project_id) / str(iid) / name
@@ -371,6 +381,62 @@ class GitlabStore:
             )
         self._conn.commit()
 
+    def _replace_issues(self, project_id: int, iid: int, issues: list) -> None:
+        self._conn.execute(
+            "DELETE FROM issues WHERE project_id = ? AND mr_iid = ?",
+            (project_id, iid),
+        )
+        for issue in issues or []:
+            if not isinstance(issue, dict):
+                continue
+            try:
+                issue_iid = int(issue.get("iid"))
+            except (TypeError, ValueError):
+                continue
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO issues (
+                  project_id, mr_iid, issue_iid, project_path, title, description, raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    iid,
+                    issue_iid,
+                    str(issue.get("project_path") or ""),
+                    issue.get("title") or "",
+                    issue.get("description") or "",
+                    json.dumps(issue, ensure_ascii=False),
+                ),
+            )
+
+    def issues_for(self, project_id: int, iid: int) -> list[dict]:
+        rows = self._conn.execute(
+            """
+            SELECT issue_iid, project_path, title, description FROM issues
+            WHERE project_id = ? AND mr_iid = ? ORDER BY project_path, issue_iid
+            """,
+            (int(project_id), int(iid)),
+        ).fetchall()
+        if rows:
+            return [
+                {
+                    "iid": row["issue_iid"],
+                    "project_path": row["project_path"] or "",
+                    "title": row["title"] or "",
+                    "description": row["description"] or "",
+                }
+                for row in rows
+            ]
+        issues_path = self.raw_root / str(int(project_id)) / str(int(iid)) / "issues.json"
+        if not issues_path.is_file():
+            return []
+        try:
+            payload = json.loads(issues_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+        return payload if isinstance(payload, list) else []
+
     def roles_for(self, project_id: int, iid: int) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM commit_roles WHERE project_id = ? AND mr_iid = ? ORDER BY created_at",
@@ -397,16 +463,17 @@ class GitlabStore:
         reviewer: str = "",
         since: str = "",
         until: str = "",
+        linked_only: bool = False,
         fixes_only: bool = False,
         min_comments: int = 0,
-        fix_pattern: str = DEFAULT_FIX_PATTERN,
     ) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM merge_requests ORDER BY merged_at DESC, project_id, iid"
         ).fetchall()
         found = []
+        want_linked = linked_only or fixes_only
         for row in rows:
-            item = self._summary(row, fix_pattern)
+            item = self._summary(row)
             if project and project.lower() not in " ".join(
                 (item["project_path"], str(item["project_id"]), item["web_url"])
             ).lower():
@@ -419,37 +486,35 @@ class GitlabStore:
                 continue
             if until and (item["merged_at"] or "") > until + "T23:59:59":
                 continue
-            if fixes_only and item["fix_count"] <= 0:
+            if want_linked and item["linked_count"] <= 0:
                 continue
             if item["comment_count"] < min_comments:
                 continue
             found.append(item)
         return found
 
-    def _summary(self, row: sqlite3.Row, fix_pattern: str) -> dict:
+    def _summary(self, row: sqlite3.Row) -> dict:
         project_id = row["project_id"]
         iid = row["iid"]
         notes = self._conn.execute(
             "SELECT author_username FROM notes WHERE project_id = ? AND mr_iid = ?",
             (project_id, iid),
         ).fetchall()
-        commits = self._conn.execute(
-            "SELECT message FROM commits WHERE project_id = ? AND mr_iid = ?",
-            (project_id, iid),
-        ).fetchall()
         reviewers = sorted({note["author_username"] for note in notes if note["author_username"]})
-        messages = [commit["message"] or "" for commit in commits]
-        fix_count = sum(1 for message in messages if is_fix_message(message, fix_pattern))
-        from scripts.gitlab.classify import classify_commits
-        from scripts.gitlab.signals import load_signal_config
-
-        raw_mr = json.loads(row["raw_json"])
-        discussions = json.loads(row["discussions_json"])
-        commit_rows = json.loads(row["commits_json"])
-        classified = classify_commits(commit_rows, raw_mr, discussions, load_signal_config(mrr_pattern=fix_pattern))
+        linked_count = self._conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM traces
+            WHERE project_id = ? AND mr_iid = ? AND status = 'linked'
+            """,
+            (project_id, iid),
+        ).fetchone()["n"]
+        roles = self.roles_for(project_id, iid)
         role_counts: dict[str, int] = {}
-        for item in classified:
+        mrr_count = 0
+        for item in roles:
             role_counts[item["role"]] = role_counts.get(item["role"], 0) + 1
+            if item["mrr"]:
+                mrr_count += 1
         return {
             "project_id": project_id,
             "iid": iid,
@@ -462,7 +527,9 @@ class GitlabStore:
             "merged_at": row["merged_at"] or "",
             "updated_at": row["updated_at"] or "",
             "comment_count": len(notes),
-            "fix_count": fix_count,
+            "linked_count": int(linked_count),
+            "mrr_count": mrr_count,
+            "fix_count": int(linked_count),
             "role_counts": role_counts,
             "lead_count": role_counts.get("team_lead_mrr", 0) + role_counts.get("team_lead_other", 0),
             "reviewers": reviewers,
@@ -479,13 +546,7 @@ class GitlabStore:
         mr = json.loads(row["raw_json"])
         discussions = json.loads(row["discussions_json"])
         commits = json.loads(row["commits_json"])
-        issues_path = self.raw_root / str(int(project_id)) / str(int(iid)) / "issues.json"
-        issues = []
-        if issues_path.is_file():
-            try:
-                issues = json.loads(issues_path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                issues = []
+        issues = self.issues_for(project_id, iid)
         diffs_by_sha: dict[str, list] = {}
         for sha_row in self._conn.execute(
             "SELECT DISTINCT sha FROM diffs WHERE project_id = ?",
@@ -526,18 +587,20 @@ class GitlabStore:
             if not self.has_mr(project_id, iid):
                 raise KeyError(ref)
             return project_id, iid
+        from scripts.gitlab.sync import _path_from_web
+
         rows = self._conn.execute(
-            """
-            SELECT project_id, iid FROM merge_requests
-            WHERE iid = ? AND (
-              project_path = ? OR web_url LIKE ? OR CAST(project_id AS TEXT) = ?
-            )
-            """,
-            (iid, project, f"%/{project}/%", project),
+            "SELECT project_id, iid, project_path, web_url FROM merge_requests WHERE iid = ?",
+            (iid,),
         ).fetchall()
-        if len(rows) != 1:
+        matches = []
+        for row in rows:
+            stored = row["project_path"] or _path_from_web({"web_url": row["web_url"] or ""})
+            if stored == project or str(row["project_id"]) == project:
+                matches.append(row)
+        if len(matches) != 1:
             raise KeyError(ref)
-        return int(rows[0]["project_id"]), int(rows[0]["iid"])
+        return int(matches[0]["project_id"]), int(matches[0]["iid"])
 
     def replace_examples(self, project_id: int, iid: int, records: list[dict]) -> None:
         now = utc_now()

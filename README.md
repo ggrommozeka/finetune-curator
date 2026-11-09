@@ -266,7 +266,7 @@ python -m scripts.export_gitlab_mrr sync \
   --refresh group/app!42
 ```
 
-`--project group/app` (repeatable) limits the sync to specific projects. `--insecure` disables TLS verification.
+`--project group/app` (repeatable) limits the sync to specific projects. Nested groups stay intact: `https://gitlab.example.com/group/nested/app/-/merge_requests/7` is stored and refreshed as `group/nested/app!7`. `--insecure` disables TLS verification. Linked issues are read from the MR title and description, including `group/project#123`. A failed issue request is logged and skipped. The issue text is stored in SQLite as well as `issues.json`.
 
 Comments from every reviewer are stored, with the author's role on the MR (author, reviewer, assignee, or commenter). `--reviewer` is an optional exact filter, not the default.
 
@@ -274,12 +274,12 @@ Each comment keeps its anchor: diff SHAs (`base` / `start` / `head`), file path,
 
 There is one team lead. `gitlab.json` names that person once and lists their aliases (`team_lead.aliases`: usernames, names, emails). `--team-lead` adds another alias of the same person. Every commit by that identity becomes a before/after hunk pair. Review comments are stored with the reviewer who wrote them. Processing keeps every reviewer in the training examples; `--reviewer` and the viewer field only filter what you look at. Titles matching `mrr_pattern` (default `\bmrr\b`, so `MRR`, `MRR fixes`, and `MRR: ...`) are flagged as the primary polish, not as the comment fix. Other commits are classified per MR as `author`, `author_fix` (author commit after a review comment), `team_lead_mrr`, `team_lead_other`, or `other`.
 
-**Phase 2 — process offline.** Pick MRs in the viewer (**GitLab** page of `streamlit run viewer/app.py`: filter by project, author, reviewer, date, MRR titles, comment count) or on the CLI. The MR page is one timeline of commits and comments. Team-lead commits are highlighted, MRR titles are marked, and each hunk has a before/after view. Comment traces still show the anchored lines and the later commit that changed them. A manual link is stored separately and overrides automatic linking. Copy `gitlab.example.json` to `gitlab.json` for that one team lead and the MRR regex. A linked comment is the earliest later commit on the same lines (confidence 0.8, or 0.9 when the thread is resolved). The same file with no line overlap is `addressed_elsewhere` (confidence 0.55).
+**Phase 2 — process offline.** Pick MRs in the viewer (**GitLab** page of `streamlit run viewer/app.py`: filter by project, author, reviewer, date, linked comments, comment count) or on the CLI. `--reviewer` and `--linked-only` only filter that list. Processing stores every reviewer. `--linked-only` keeps MRs that already have a comment linked to a later commit, which is separate from the count of team-lead MRR commits. The MR page is one timeline of commits and comments. Team-lead commits are highlighted, MRR titles are marked, and each hunk has a before/after view. Comment traces still show the anchored lines and the later commit that changed them. A manual link is stored separately and overrides automatic linking. Copy `gitlab.example.json` to `gitlab.json` for that one team lead and the MRR regex. A linked comment is the earliest later commit on the same lines (confidence 0.8, or 0.9 when the thread is resolved). The same file with no line overlap is `addressed_elsewhere` (confidence 0.55).
 
 Examples and keep/discard edits are stored in separate tables from the raw MR, so you can process again without fetching. `--anonymize` strips author names and emails from examples only; `--anonymize-urls` also replaces URLs. The raw store is left intact.
 
 ```bash
-python -m scripts.export_gitlab_mrr list --fixes-only
+python -m scripts.export_gitlab_mrr list --linked-only
 
 python -m scripts.export_gitlab_mrr process \
   --mr group/app!42 --mr group/app!43 \
@@ -323,7 +323,6 @@ GITLAB_TOKEN=example python -m scripts.export_gitlab_mrr sync \
 python -m scripts.export_gitlab_mrr process \
   --store /tmp/gitlab-store \
   --mr group/app!7 \
-  --reviewer teamlead \
   --anonymize
 ```
 

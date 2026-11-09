@@ -178,22 +178,22 @@ def _hunks_for(diffs: list[dict], path: str | None) -> tuple[list[Hunk], list[Hu
 
 def link_comment(
     note: dict,
-    fix_commits: list[dict],
+    later_commits: list[dict],
     diffs_by_sha: dict[str, list[dict]],
     *,
     line_pad: int = 2,
 ) -> dict | None:
-    """Link one note. ``MRR fixes`` commits are preferred; other later commits still count.
+    """Link one note to a later commit that touches the anchored lines.
 
-    Line numbers are replayed through each later diff, so a fix is found after
-    earlier commits shift the anchored line. Returns None when nothing after
-    the comment can be tied to a hunk.
+    Commit titles are not consulted. Line numbers are replayed through each
+    later diff, so a change is found after earlier commits shift the line.
+    Returns None when nothing after the comment can be tied to a hunk.
     """
     from scripts.gitlab.trace import trace_thread
 
     traced = trace_thread(
         {"root": note, "replies": [], "discussion_id": ""},
-        fix_commits,
+        later_commits,
         diffs_by_sha,
         {},
         line_pad=line_pad,
@@ -236,13 +236,3 @@ def flatten_notes(discussions: list[dict], reviewer: str | None = None) -> list[
             notes.append(note)
     return notes
 
-
-def fix_commits(commits: list[dict], pattern: str = DEFAULT_FIX_PATTERN) -> list[dict]:
-    found = []
-    for commit in commits or []:
-        message = "\n".join(
-            part for part in (commit.get("message"), commit.get("title")) if part
-        )
-        if is_fix_message(message, pattern):
-            found.append(commit)
-    return found

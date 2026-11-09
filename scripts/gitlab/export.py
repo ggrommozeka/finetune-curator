@@ -61,16 +61,18 @@ def records_from_bundle(
     max_chars: int,
     signal_config=None,
 ) -> tuple[list[dict], dict]:
-    """Link comments to fixes using only data already in memory."""
+    """Link comments to fixes using only data already in memory.
+
+    ``reviewer`` is accepted so older callers keep working. It does not drop comments.
+    """
     from scripts.gitlab.trace import build_traces
 
+    _ = reviewer
     traces = build_traces(
         discussions,
         commits,
         diffs_by_sha,
         mr,
-        reviewer=reviewer,
-        fix_pattern=fix_pattern,
         line_pad=line_pad,
     )
     records, stats = records_from_traces(mr, traces, max_chars=max_chars)

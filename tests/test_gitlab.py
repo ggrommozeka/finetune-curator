@@ -221,8 +221,8 @@ def test_export_fixture_anonymizes_and_builds_dpo(tmp_path: Path):
     assert stats["merge_requests"] == 1
     assert stats["file_line"] == 1
     assert stats["mr"] == 0
-    assert stats["unlinked"] == 2
-    assert stats["comments"] == 3
+    assert stats["unlinked"] == 3
+    assert stats["comments"] == 4
     blob = json.dumps(records)
     assert TOKEN not in blob
     assert "lead@company.com" not in blob
@@ -395,12 +395,12 @@ def test_sync_is_incremental_and_process_is_offline(tmp_path: Path):
         raise AssertionError("process must not touch GitLab")
 
     client.transport = offline
-    stats = process_store(store, ["1!7"], reviewer="teamlead", anonymize=True, anonymize_urls=True)
+    stats = process_store(store, ["1!7"], anonymize=True, anonymize_urls=True)
     assert stats["examples"] == 1
     assert stats["file_line"] == 1
     example_id = store.examples_for(1, 7)[0]["id"]
     store.set_decision(example_id, "keep", user_text="EDITED INPUT", assistant_text="EDITED OUTPUT")
-    process_store(store, ["group/app!7"], reviewer="teamlead", anonymize=True, anonymize_urls=True)
+    process_store(store, ["group/app!7"], anonymize=True, anonymize_urls=True)
     decision = store.get_decision(example_id)
     assert decision["status"] == "keep"
     assert decision["user_text"] == "EDITED INPUT"
@@ -422,7 +422,7 @@ def test_sync_is_incremental_and_process_is_offline(tmp_path: Path):
     assert any(reply["body"] == "ack, renaming" for reply in anchored["replies"])
     assert anchored["resolved_by"]
     store.set_link_override(1, "11", "not_addressed")
-    process_store(store, ["1!7"], reviewer="teamlead", anonymize=True, anonymize_urls=True)
+    process_store(store, ["1!7"], anonymize=True, anonymize_urls=True)
     assert store.traces_for(1, 7)
     overridden = next(item for item in store.traces_for(1, 7) if item["note_id"] == "11")
     assert overridden["manual"] is True
@@ -435,8 +435,10 @@ def test_sync_is_incremental_and_process_is_offline(tmp_path: Path):
     assert stats["by_reviewer"]
     assert stats["by_file"]
 
-    listed = store.list_mrs(reviewer="teamlead", fixes_only=True, min_comments=1)
+    listed = store.list_mrs(reviewer="teamlead", min_comments=1)
     assert [row["ref"] for row in listed] == ["1!7"]
+    assert listed[0]["linked_count"] == 0
+    assert store.list_mrs(linked_only=True) == []
     assert store.list_mrs(fixes_only=True, since="2025-01-01") == []
     client.transport = transport
     refreshed = sync_store(client, store, refresh=["1!7"])
@@ -521,8 +523,6 @@ def test_cli_fixture_does_not_leak_token(tmp_path: Path):
             str(store),
             "--mr",
             "group/app!7",
-            "--reviewer",
-            "TeamLead",
             "--anonymize",
             "--anonymize-urls",
             "--rules",
@@ -534,6 +534,10 @@ def test_cli_fixture_does_not_leak_token(tmp_path: Path):
     )
     assert processed.returncode == 0, processed.stderr + processed.stdout
     assert "file+line: 1" in processed.stdout
+    kept = GitlabStore(store)
+    reviewers = {trace.get("reviewer") for trace in kept.traces_for(1, 7)}
+    kept.close()
+    assert len(reviewers) >= 2
     assert TOKEN not in rules.read_text(encoding="utf-8")
 
     db = GitlabStore(store)
@@ -565,3 +569,124 @@ def test_cli_fixture_does_not_leak_token(tmp_path: Path):
     dpo_only = run(["export", "--dpo-from", str(sft), "--dpo", str(rebuilt)])
     assert dpo_only.returncode == 0, dpo_only.stderr
     assert rebuilt.read_text(encoding="utf-8") == dpo.read_text(encoding="utf-8")
+
+
+def test_nested_project_path_and_refresh_ref(tmp_path: Path):
+    from scripts.gitlab.sync import _path_from_web
+
+    web = "https://gitlab.example.com/group/nested/app/-/merge_requests/7"
+    assert _path_from_web({"web_url": web}) == "group/nested/app"
+    assert _path_from_web({"web_url": "https://gitlab.example.com/group/app/-/merge_requests/7"}) == "group/app"
+
+    store = GitlabStore(tmp_path / "gitlab")
+    store.save_bundle(
+        {
+            "project_id": 5,
+            "iid": 7,
+            "title": "Nested",
+            "web_url": web,
+            "author": {"username": "ada"},
+        },
+        [],
+        [],
+        {},
+        [],
+        project_path="group/nested/app",
+    )
+    assert store.resolve_ref("group/nested/app!7") == (5, 7)
+    with pytest.raises(KeyError):
+        store.resolve_ref("nested/app!7")
+    store.close()
+
+
+def test_list_counts_linked_traces_separately_from_mrr(tmp_path: Path):
+    store = GitlabStore(tmp_path / "gitlab")
+    store.save_bundle(
+        {
+            "project_id": 1,
+            "iid": 7,
+            "title": "MRR fixes: this title is not a link",
+            "author": {"username": "ada"},
+            "web_url": "https://gitlab.example.com/group/app/-/merge_requests/7",
+        },
+        [],
+        [{"id": "abc", "message": "MRR fixes: rename", "title": "MRR fixes: rename"}],
+        {},
+        [],
+        project_path="group/app",
+    )
+    assert store.list_mrs(linked_only=True) == []
+    assert store.list_mrs(fixes_only=True) == []
+    store.replace_traces(
+        1,
+        7,
+        [{"note_id": "11", "author_username": "ada", "status": "linked", "anchor": {}, "confidence": 0.8}],
+    )
+    store.replace_roles(
+        1,
+        7,
+        [{"sha": "abc", "role": "team_lead_mrr", "mrr": True, "message": "MRR fixes: rename"}],
+    )
+    listed = store.list_mrs(linked_only=True)
+    assert [row["ref"] for row in listed] == ["1!7"]
+    assert listed[0]["linked_count"] == 1
+    assert listed[0]["mrr_count"] == 1
+    assert listed[0]["fix_count"] == listed[0]["linked_count"]
+    store.close()
+
+
+def test_linked_issues_from_title_and_other_project(tmp_path: Path, caplog):
+    from scripts.gitlab.sync import fetch_bundle, linked_issue_refs
+
+    assert linked_issue_refs("See other/app#3", "Also #4 and issues/9") == [
+        ("other/app", "3"),
+        ("", "4"),
+        ("", "9"),
+    ]
+
+    class Client:
+        def __init__(self):
+            self.paths = []
+
+        def get_all(self, _path):
+            return []
+
+        def get_all_optional(self, _path):
+            return []
+
+        def get_text(self, _path, _params=None):
+            return None
+
+        def request_json(self, _method, path):
+            self.paths.append(path)
+            if path.endswith("/issues/9"):
+                raise GitLabError("issue 9 missing")
+            if path.endswith("/issues/4"):
+                return 200, {}, {"iid": 4, "title": "Local", "description": "here"}
+            if "other%2Fapp/issues/3" in path:
+                return 200, {}, {"iid": 3, "title": "Cross", "description": "there"}
+            raise GitLabError(path)
+
+    client = Client()
+    with caplog.at_level("WARNING"):
+        bundle = fetch_bundle(
+            client,
+            {
+                "project_id": 1,
+                "iid": 7,
+                "title": "See other/app#3 and #4",
+                "description": "Broken issues/9",
+                "diff_refs": {},
+            },
+        )
+    assert "issue 9 missing" in caplog.text
+    assert {(item["project_path"], item["iid"], item["title"]) for item in bundle["issues"]} == {
+        ("other/app", 3, "Cross"),
+        ("", 4, "Local"),
+    }
+    store = GitlabStore(tmp_path / "gitlab")
+    store.save_bundle(bundle["mr"], [], [], {}, [], issues=bundle["issues"], project_path="group/app")
+    (store.raw_root / "1" / "7" / "issues.json").unlink()
+    loaded = store.load_bundle(1, 7)
+    assert [item["title"] for item in loaded["issues"]] == ["Local", "Cross"]
+    store.close()
