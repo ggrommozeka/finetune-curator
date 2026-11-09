@@ -1,0 +1,12 @@
+{
+  "task_type": "bugfix",
+  "domain": "python",
+  "project": "api",
+  "languages": ["python"],
+  "tools": ["bash"],
+  "outcome": "fail",
+  "failure_step": "reran the same pytest",
+  "error_type": "loop",
+  "user_correction": "stop rerunning the same command",
+  "what_worked": ""
+}

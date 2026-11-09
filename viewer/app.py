@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One Streamlit app for OpenCode sessions, GitLab reviews, proposals, and export.
+"""One Streamlit app for sessions, GitLab reviews, proposals, export, and monitoring.
 
 Launch:
     streamlit run viewer/app.py
@@ -25,6 +25,7 @@ pages = [
     st.Page("pages/gitlab.py", title="GitLab"),
     st.Page("pages/proposals.py", title="Правила"),
     st.Page("pages/export_page.py", title="Экспорт"),
+    st.Page("pages/monitoring.py", title="Мониторинг"),
 ]
 navigation = st.navigation(pages)
 navigation.run()

@@ -387,13 +387,16 @@ def test_per_session_mode_survives_normalize_and_blocks_other_modes(tmp_path: Pa
     assert normalized["mode"] == "per-session"
 
     path = tmp_path / "rule_proposals.json"
-    corpus = {**normalized, "text": "corpus wording that must stay"}
-    corpus["mode"] = "corpus"
-    save_proposals(path, {"version": 2, "proposals": [corpus]})
-    upsert_proposals(path, [{**normalized, "text": "per-session overwrite"}], mode="per-session")
-    kept = load_proposals(path)["proposals"][0]
-    assert kept["text"] == "corpus wording that must stay"
-    assert kept["mode"] == "corpus"
+    save_proposals(path, {"version": 2, "mode": "per-session", "proposals": [normalized]})
+    upsert_proposals(
+        path,
+        [{**normalized, "id": normalized["id"], "text": "corpus wording", "mode": "corpus"}],
+        mode="corpus",
+        drop_modes={"per-session"},
+    )
+    kept = load_proposals(path)["proposals"]
+    assert [item["text"] for item in kept] == ["corpus wording"]
+    assert kept[0]["mode"] == "corpus"
 
 
 def test_stamp_machine_keeps_logminer_score(tmp_path: Path):

@@ -85,6 +85,7 @@ def render() -> None:
             unsafe_allow_html=True,
         )
         st.code("python -m scripts.propose_rules --input data/raw_scored.jsonl", language="bash")
+        _render_clusters()
         return
 
     visible = [
@@ -155,6 +156,54 @@ def render() -> None:
             rule_decisions["statuses"].pop(rid, None)
             save_rule_decisions(decisions_p, rule_decisions)
             st.rerun()
+    _render_clusters()
+
+
+def _render_clusters() -> None:
+    """Corpus clusters stay on this page. Approval is the list above."""
+    root = Path(st.session_state.get("cfg_patterns", "data/patterns"))
+    if not (root / "store.db").exists():
+        return
+    from scripts.patterns.store import PatternStore
+
+    store = PatternStore(root)
+    try:
+        clusters = store.clusters()
+        if not clusters:
+            return
+        reviewer_filter = st.text_input("Ревьюер GitLab", key="pat_reviewer", **widget_value("pat_reviewer", ""))
+        sessions = {row["global_id"]: row for row in store.sessions()}
+        if reviewer_filter:
+            clusters = [
+                cluster
+                for cluster in clusters
+                if any(
+                    reviewer_filter.lower() in str(sessions.get(gid, {}).get("reviewer") or "").lower()
+                    for gid in cluster.get("session_ids") or []
+                )
+            ]
+        st.markdown("### Кластеры")
+        st.caption("Те же предложения, что в списке выше. Фильтр ревьюера скрывает чужие комментарии, не удаляет их.")
+        for cluster in clusters[:30]:
+            st.markdown(
+                f"**{esc(cluster.get('label') or cluster['id'])}** · n={cluster.get('frequency')} · "
+                f"fail {cluster.get('fail_rate')} · tasks {cluster.get('task_types')} · "
+                f"{', '.join(cluster.get('machine_names') or [])}"
+            )
+            for gid in (cluster.get("session_ids") or [])[:8]:
+                session = sessions.get(gid) or {}
+                if reviewer_filter and reviewer_filter.lower() not in str(session.get("reviewer") or "").lower():
+                    continue
+                annotation = store.annotation(gid) or {}
+                who = f" · {session.get('reviewer')}" if session.get("reviewer") else ""
+                st.caption(
+                    f"{gid}{who} · {annotation.get('outcome') or ''} · {annotation.get('error_type') or ''} · "
+                    f"{annotation.get('user_correction') or annotation.get('what_worked') or ''}"
+                )
+                if st.button(f"Открыть {gid}", key=f"cluster_open_{cluster['id']}_{gid}"):
+                    open_evidence(gid)
+    finally:
+        store.close()
 
 
 def _save(decisions, path, rid, status, text, category, kind) -> None:
