@@ -31,10 +31,15 @@ def render() -> None:
         reviewer = st.text_input("Ревьюер", key="gl_reviewer", **_widget_value("gl_reviewer", ""))
         since = st.text_input("С даты", key="gl_since", **_widget_value("gl_since", ""))
         until = st.text_input("По дату", key="gl_until", **_widget_value("gl_until", ""))
-        fixes_only = st.checkbox("Только с MRR fixes", key="gl_fixes", **_widget_value("gl_fixes", False))
+        fixes_only = st.checkbox("Только с MRR в заголовке", key="gl_fixes", **_widget_value("gl_fixes", False))
+        team_leads = st.text_input(
+            "Тимлид (username, имя или email, через запятую)",
+            key="gl_leads",
+            **_widget_value("gl_leads", ""),
+        )
         min_comments = st.number_input("Мин. комментариев", min_value=0, step=1, key="gl_min_comments")
         fix_pattern = st.text_input(
-            "Паттерн фикса",
+            "Регулярное выражение MRR",
             key="gl_pattern",
             **_widget_value("gl_pattern", DEFAULT_FIX_PATTERN),
         )
@@ -98,6 +103,7 @@ def render() -> None:
                         fix_pattern=fix_pattern or DEFAULT_FIX_PATTERN,
                         anonymize=anonymize,
                         anonymize_urls=anonymize_urls,
+                        signal_config=_signal_config(team_leads, fix_pattern),
                     )
                     st.success(f"Примеров: {stats['examples']}")
                     st.rerun()
@@ -147,7 +153,7 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
         <div class="hero">
           <p class="hero-title">!{iid} {_esc(summary['title'])}</p>
           <p class="hero-sub">{_esc(summary['author_username'])} · { _esc(summary['merged_at'] or '—') }
-          · {summary['comment_count']} comments · {summary['fix_count']} MRR fixes</p>
+          · {summary['comment_count']} comments · {summary.get('lead_count', 0)} team-lead · {summary['fix_count']} MRR titles</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -159,13 +165,7 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
         st.markdown("**Описание**")
         st.text(description[:4000])
 
-    st.markdown("**Коммиты**")
-    from scripts.gitlab.link import is_fix_message
-
-    for commit in bundle["commits"]:
-        message = (commit.get("message") or commit.get("title") or "").strip().splitlines()[0] if (commit.get("message") or commit.get("title")) else commit.get("id", "")
-        mark = "FIX" if is_fix_message(commit.get("message") or commit.get("title") or "", fix_pattern) else "commit"
-        st.caption(f"{mark}  {commit.get('id', '')[:10]}  {message}")
+    _render_timeline(bundle, _signal_config(st.session_state.get("gl_leads", ""), fix_pattern))
 
     traces = store.traces_for(project_id, iid)
     if traces:
@@ -189,6 +189,7 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
             fix_pattern=fix_pattern,
             anonymize=anonymize,
             anonymize_urls=anonymize_urls,
+            signal_config=_signal_config(st.session_state.get("gl_leads", ""), fix_pattern),
         )
         st.rerun()
 
@@ -199,6 +200,84 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
     st.markdown(f"**Примеры ({len(examples)})**")
     for item in examples:
         _render_example(store, item)
+
+
+def _signal_config(team_leads: str, pattern: str):
+    from scripts.gitlab.signals import load_signal_config
+
+    leads = [part.strip() for part in (team_leads or "").split(",") if part.strip()]
+    return load_signal_config(team_leads=leads, mrr_pattern=pattern or DEFAULT_FIX_PATTERN)
+
+
+def _render_timeline(bundle: dict, config) -> None:
+    from scripts.gitlab.classify import classify_commits
+    from scripts.gitlab.link import parse_hunks
+    from scripts.gitlab.trace import iter_threads
+
+    roles = {row["sha"]: row for row in classify_commits(bundle["commits"], bundle["mr"], bundle["discussions"], config)}
+    events = []
+    for commit in bundle["commits"]:
+        sha = str(commit.get("id") or "")
+        role = roles.get(sha) or {}
+        hunks = []
+        for diff in bundle["diffs_by_sha"].get(sha) or []:
+            path = diff.get("new_path") or diff.get("old_path") or ""
+            for hunk in parse_hunks(diff.get("diff") or ""):
+                hunks.append({"file": path, "before": hunk.before, "after": hunk.after})
+        events.append(
+            {
+                "at": commit.get("created_at") or "",
+                "type": "commit",
+                "sha": sha,
+                "role": role.get("role") or "other",
+                "mrr": bool(role.get("mrr")),
+                "title": (commit.get("title") or commit.get("message") or "").splitlines()[0],
+                "hunks": hunks,
+            }
+        )
+    for thread in iter_threads(bundle["discussions"], None):
+        note = thread["root"]
+        events.append(
+            {
+                "at": note.get("created_at") or "",
+                "type": "comment",
+                "author": (note.get("author") or {}).get("username") or "",
+                "body": note.get("body") or "",
+                "file": (note.get("position") or {}).get("new_path") or "",
+            }
+        )
+    events.sort(key=lambda item: item["at"])
+    st.markdown("**Хронология**")
+    counts = {}
+    for role in roles.values():
+        counts[role["role"]] = counts.get(role["role"], 0) + 1
+    if counts:
+        st.caption(
+            "Коммиты: "
+            + ", ".join(f"{name} {count}" for name, count in sorted(counts.items()))
+        )
+    for event in events:
+        if event["type"] == "comment":
+            where = f" · {event['file']}" if event["file"] else ""
+            st.markdown(f"`comment` **{_esc(event['author'])}**{where}")
+            st.text(event["body"])
+            continue
+        lead = event["role"].startswith("team_lead")
+        mark = "MRR" if event["mrr"] else event["role"]
+        title = f"{'◆ ' if lead else ''}{mark}  {event['sha'][:10]}  {event['title']}"
+        if lead:
+            st.markdown(
+                f"<div class='hero' style='padding:10px 14px'><p class='hero-title'>{_esc(title)}</p></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(f"`{_esc(mark)}` {event['sha'][:10]}  {_esc(event['title'])}")
+        for hunk in event["hunks"]:
+            left, right = st.columns(2)
+            left.markdown(f"**До** `{hunk['file']}`")
+            left.code(hunk["before"] or "—", language="text")
+            right.markdown("**После**")
+            right.code(hunk["after"] or "—", language="text")
 
 
 def _render_stats(stats: dict, title: str) -> None:
@@ -294,6 +373,7 @@ def _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymi
                 fix_pattern=fix_pattern,
                 anonymize=anonymize,
                 anonymize_urls=anonymize_urls,
+                signal_config=_signal_config(st.session_state.get("gl_leads", ""), fix_pattern),
             )
             st.rerun()
         if b2.button("Не исправлено", key=f"ov_none_{note_id}"):
@@ -304,6 +384,7 @@ def _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymi
                 fix_pattern=fix_pattern,
                 anonymize=anonymize,
                 anonymize_urls=anonymize_urls,
+                signal_config=_signal_config(st.session_state.get("gl_leads", ""), fix_pattern),
             )
             st.rerun()
     st.markdown("---")

@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS commits (
   created_at TEXT,
   author_name TEXT,
   author_email TEXT,
+  committer_name TEXT,
+  committer_email TEXT,
   PRIMARY KEY (project_id, mr_iid, sha)
 );
 CREATE TABLE IF NOT EXISTS diffs (
@@ -113,6 +115,18 @@ CREATE TABLE IF NOT EXISTS traces (
   trace_json TEXT NOT NULL,
   PRIMARY KEY (project_id, note_id)
 );
+CREATE TABLE IF NOT EXISTS commit_roles (
+  project_id INTEGER NOT NULL,
+  mr_iid INTEGER NOT NULL,
+  sha TEXT NOT NULL,
+  role TEXT NOT NULL,
+  mrr INTEGER NOT NULL,
+  message TEXT,
+  author_name TEXT,
+  author_email TEXT,
+  created_at TEXT,
+  PRIMARY KEY (project_id, mr_iid, sha)
+);
 CREATE TABLE IF NOT EXISTS link_overrides (
   project_id INTEGER NOT NULL,
   note_id TEXT NOT NULL,
@@ -123,6 +137,13 @@ CREATE TABLE IF NOT EXISTS link_overrides (
   PRIMARY KEY (project_id, note_id)
 );
 """
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(commits)")}
+    for name in ("committer_name", "committer_email"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE commits ADD COLUMN {name} TEXT")
 
 
 def utc_now() -> str:
@@ -149,6 +170,7 @@ class GitlabStore:
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA)
+        _ensure_columns(self._conn)
         self._conn.commit()
 
     def close(self) -> None:
@@ -273,8 +295,9 @@ class GitlabStore:
                 self._conn.execute(
                     """
                     INSERT OR REPLACE INTO commits (
-                      project_id, mr_iid, sha, message, created_at, author_name, author_email
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                      project_id, mr_iid, sha, message, created_at, author_name, author_email,
+                      committer_name, committer_email
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id,
@@ -282,8 +305,10 @@ class GitlabStore:
                         sha,
                         message,
                         commit.get("created_at") or commit.get("committed_date") or "",
-                        commit.get("author_name") or "",
-                        commit.get("author_email") or "",
+                        commit.get("author_name") or (commit.get("author") or {}).get("name") or "",
+                        commit.get("author_email") or (commit.get("author") or {}).get("email") or "",
+                        commit.get("committer_name") or (commit.get("committer") or {}).get("name") or "",
+                        commit.get("committer_email") or (commit.get("committer") or {}).get("email") or "",
                     ),
                 )
             for sha in diffs_by_sha:
@@ -317,6 +342,50 @@ class GitlabStore:
         path = self.raw_root / str(project_id) / str(iid) / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def replace_roles(self, project_id: int, iid: int, roles: list[dict]) -> None:
+        self._conn.execute(
+            "DELETE FROM commit_roles WHERE project_id = ? AND mr_iid = ?",
+            (project_id, iid),
+        )
+        for role in roles:
+            self._conn.execute(
+                """
+                INSERT INTO commit_roles (
+                  project_id, mr_iid, sha, role, mrr, message, author_name, author_email, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    iid,
+                    role.get("sha") or "",
+                    role.get("role") or "other",
+                    1 if role.get("mrr") else 0,
+                    role.get("message") or "",
+                    role.get("author_name") or "",
+                    role.get("author_email") or "",
+                    role.get("created_at") or "",
+                ),
+            )
+        self._conn.commit()
+
+    def roles_for(self, project_id: int, iid: int) -> list[dict]:
+        rows = self._conn.execute(
+            "SELECT * FROM commit_roles WHERE project_id = ? AND mr_iid = ? ORDER BY created_at",
+            (project_id, iid),
+        ).fetchall()
+        return [
+            {
+                "sha": row["sha"],
+                "role": row["role"],
+                "mrr": bool(row["mrr"]),
+                "message": row["message"] or "",
+                "author_name": row["author_name"] or "",
+                "author_email": row["author_email"] or "",
+                "created_at": row["created_at"] or "",
+            }
+            for row in rows
+        ]
 
     def list_mrs(
         self,
@@ -367,7 +436,18 @@ class GitlabStore:
             (project_id, iid),
         ).fetchall()
         reviewers = sorted({note["author_username"] for note in notes if note["author_username"]})
-        fix_count = sum(1 for commit in commits if is_fix_message(commit["message"] or "", fix_pattern))
+        messages = [commit["message"] or "" for commit in commits]
+        fix_count = sum(1 for message in messages if is_fix_message(message, fix_pattern))
+        from scripts.gitlab.classify import classify_commits
+        from scripts.gitlab.signals import load_signal_config
+
+        raw_mr = json.loads(row["raw_json"])
+        discussions = json.loads(row["discussions_json"])
+        commit_rows = json.loads(row["commits_json"])
+        classified = classify_commits(commit_rows, raw_mr, discussions, load_signal_config(mrr_pattern=fix_pattern))
+        role_counts: dict[str, int] = {}
+        for item in classified:
+            role_counts[item["role"]] = role_counts.get(item["role"], 0) + 1
         return {
             "project_id": project_id,
             "iid": iid,
@@ -381,6 +461,8 @@ class GitlabStore:
             "updated_at": row["updated_at"] or "",
             "comment_count": len(notes),
             "fix_count": fix_count,
+            "role_counts": role_counts,
+            "lead_count": role_counts.get("team_lead_mrr", 0) + role_counts.get("team_lead_other", 0),
             "reviewers": reviewers,
             "ref": f"{project_id}!{iid}",
         }

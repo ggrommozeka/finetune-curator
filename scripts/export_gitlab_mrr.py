@@ -90,7 +90,11 @@ def _process_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mr", action="append", default=[], help="MR to process: project!iid. Repeatable.")
     parser.add_argument("--all", action="store_true", help="Process every MR in the store")
     parser.add_argument("--reviewer", default=None, help="Only notes by this GitLab username")
-    parser.add_argument("--fix-pattern", default=DEFAULT_FIX_PATTERN, help="Case-insensitive regex for fix commits")
+    parser.add_argument("--config", default=None, help="JSON file with team_leads and mrr_pattern (default: gitlab.json if present)")
+    parser.add_argument("--team-lead", action="append", default=None, help="Team-lead username, name, or email. Repeatable.")
+    parser.add_argument("--mrr-pattern", default=None, help="Case-insensitive regex for MRR polish titles (default: \\bmrr\\b)")
+    parser.add_argument("--fix-pattern", default=None, help="Deprecated alias of --mrr-pattern")
+    parser.add_argument("--summarize-polish", action="store_true", help="Ask the local model to label each team-lead hunk")
     parser.add_argument("--line-pad", type=int, default=2)
     parser.add_argument("--max-hunk-chars", type=int, default=8000)
     parser.add_argument("--anonymize", action="store_true", help="Strip author names and emails from examples")
@@ -148,7 +152,8 @@ def _compile_pattern(pattern: str) -> None:
 
 def _selected_refs(store: GitlabStore, args) -> list[str]:
     if args.all:
-        return [item["ref"] for item in store.list_mrs(fix_pattern=args.fix_pattern)]
+        pattern = args.mrr_pattern or args.fix_pattern or DEFAULT_FIX_PATTERN
+        return [item["ref"] for item in store.list_mrs(fix_pattern=pattern)]
     if not args.mr:
         raise SystemExit("Pass --mr project!iid (repeatable) or --all")
     for ref in args.mr:
@@ -208,7 +213,7 @@ def _propose(records: list[dict], args) -> None:
         records,
         {"labels": {}, "notes": {}},
         complete_fn,
-        sources=("gitlab_review",),
+        sources=("gitlab_review", "gitlab_polish"),
         model=model,
         base_url=base_url,
     )
@@ -248,6 +253,13 @@ def _cmd_sync(args) -> None:
     print(f"Store: {args.store}")
 
 
+def _signals(args):
+    from scripts.gitlab.signals import load_signal_config
+
+    pattern = args.mrr_pattern or args.fix_pattern
+    return load_signal_config(getattr(args, "config", None), team_leads=args.team_lead, mrr_pattern=pattern)
+
+
 def _cmd_list(args) -> None:
     _compile_pattern(args.fix_pattern)
     store = GitlabStore(args.store)
@@ -276,8 +288,32 @@ def _cmd_list(args) -> None:
         )
 
 
+def _polish_fn(args):
+    if not args.summarize_polish:
+        return None
+    if args.mock_response:
+        raw = Path(args.mock_response).read_text(encoding="utf-8")
+        return lambda _messages: raw
+    from scripts.rules.llm import chat_complete, thinking_controls
+    from scripts.propose_rules import _resolve
+    import argparse
+
+    endpoint = _resolve(
+        argparse.Namespace(base_url=None, api_key=None, model=None, from_opencode=None, opencode_config=None)
+    )
+    if not endpoint.model:
+        raise SystemExit("Set FINETUNE_CURATOR_MODEL or pass --mock-response with --summarize-polish.")
+    _suffix, extra = thinking_controls(True)
+
+    def complete(messages, extra_body=extra):
+        return chat_complete(endpoint, messages, temperature=0.1, max_tokens=64, timeout=120, extra_body=extra_body or None)
+
+    return complete
+
+
 def _cmd_process(args) -> None:
-    _compile_pattern(args.fix_pattern)
+    config = _signals(args)
+    _compile_pattern(config.mrr_pattern)
     store = GitlabStore(args.store)
     try:
         refs = _selected_refs(store, args)
@@ -285,7 +321,9 @@ def _cmd_process(args) -> None:
             store,
             refs,
             reviewer=args.reviewer,
-            fix_pattern=args.fix_pattern,
+            fix_pattern=config.mrr_pattern,
+            signal_config=config,
+            complete_fn=_polish_fn(args),
             line_pad=args.line_pad,
             max_chars=args.max_hunk_chars,
             anonymize=args.anonymize,

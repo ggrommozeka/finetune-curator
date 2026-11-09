@@ -13,6 +13,7 @@ data/gitlab/
 data/patterns/
 !data/.gitkeep
 .env
+gitlab.json
 *.egg-info/
 dist/
 build/

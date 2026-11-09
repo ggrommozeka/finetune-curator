@@ -64,6 +64,7 @@ def build_sft_record(mr: dict, note: dict, link: dict, *, max_chars: int = 8000)
     return {
         "id": record_id,
         "source": "gitlab_review",
+        "kind": "comment_fix",
         "label": "gitlab",
         "messages": [
             {"role": "user", "content": user},
@@ -81,6 +82,7 @@ def build_sft_record(mr: dict, note: dict, link: dict, *, max_chars: int = 8000)
             "after": after,
             "diff": clip(str(link.get("diff") or ""), max_chars),
             "confidence": link.get("confidence"),
+            "kind": "comment_fix",
             "link": link.get("link"),
             "commit_sha": link.get("commit_sha"),
             "commit_message": link.get("commit_message"),
