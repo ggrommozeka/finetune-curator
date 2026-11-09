@@ -46,6 +46,7 @@ def normalize_proposal(item: dict) -> dict:
         "conflicts": [str(conflict) for conflict in (item.get("conflicts") or [])],
         "mode": str(item.get("mode") or ""),
         "cluster_id": str(item.get("cluster_id") or ""),
+        "source": str(item.get("source") or "opencode"),
     }
 
 
@@ -171,6 +172,7 @@ def public_rule(rule: dict) -> dict:
         "rationale": rule.get("rationale") or "",
         "session_ids": list(rule.get("session_ids") or []),
         "evidence": rule.get("evidence") or "",
+        "source": rule.get("source") or "opencode",
     }
 
 

@@ -162,7 +162,7 @@ def _propose(records: list[dict], args) -> None:
         return
     from scripts.rules.llm import chat_complete, thinking_controls
     from scripts.rules.propose import propose_rules
-    from scripts.rules.store import save_proposals
+    from scripts.rules.store import upsert_proposals
 
     if args.mock_response:
         raw = Path(args.mock_response).read_text(encoding="utf-8")
@@ -213,8 +213,10 @@ def _propose(records: list[dict], args) -> None:
         base_url=base_url,
     )
     destination = Path(args.rules_output)
-    save_proposals(destination, document)
-    print(f"Rules: {len(document['rules'])} -> {destination}")
+    for item in document.get("proposals") or []:
+        item["source"] = "gitlab"
+    upsert_proposals(destination, document.get("proposals") or [])
+    print(f"Rules: {len(document.get('proposals') or [])} -> {destination}")
 
 
 def _cmd_sync(args) -> None:

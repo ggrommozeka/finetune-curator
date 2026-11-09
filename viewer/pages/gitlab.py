@@ -7,25 +7,25 @@ from pathlib import Path
 
 import streamlit as st
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.gitlab.link import DEFAULT_FIX_PATTERN  # noqa: E402
 from scripts.gitlab.store import GitlabStore  # noqa: E402
 from scripts.gitlab.sync import process_store  # noqa: E402
+from shared import esc as _esc  # noqa: E402
+from shared import widget_value as _widget_value  # noqa: E402
 
 
-def _widget_value(key: str, default):
-    if key in st.session_state:
-        return {}
-    return {"value": default}
-
-
-def render_gitlab_page(cli) -> None:
-    del cli
+def render() -> None:
     with st.sidebar:
-        store_path = st.text_input("GitLab store", key="gitlab_store", **_widget_value("gitlab_store", "data/gitlab"))
+        st.markdown("### ◈ GitLab")
+        store_path = st.text_input(
+            "GitLab store",
+            key="gitlab_store",
+            **_widget_value("gitlab_store", st.session_state.get("cfg_gitlab", "data/gitlab")),
+        )
         project = st.text_input("Проект", key="gl_project", **_widget_value("gl_project", ""))
         author = st.text_input("Автор MR", key="gl_author", **_widget_value("gl_author", ""))
         reviewer = st.text_input("Ревьюер", key="gl_reviewer", **_widget_value("gl_reviewer", ""))
@@ -110,7 +110,17 @@ def render_gitlab_page(cli) -> None:
         if overall["total"]["comments"]:
             _render_stats(overall, "Все MR в хранилище")
 
-        current = st.selectbox("Merge request", list(labels), format_func=lambda ref: labels[ref])
+        focus = st.session_state.pop("gitlab_focus", None)
+        if focus and focus.get("project_id") and focus.get("mr_iid"):
+            focused = f"{int(focus['project_id'])}!{int(focus['mr_iid'])}"
+            if focused in labels:
+                st.session_state.gitlab_mr = focused
+        current = st.selectbox(
+            "Merge request",
+            list(labels),
+            format_func=lambda ref: labels[ref],
+            key="gitlab_mr",
+        )
         summary = next(row for row in rows if row["ref"] == current)
         _render_mr(
             store,
@@ -305,7 +315,10 @@ def _render_example(store: GitlabStore, item: dict) -> None:
     gitlab = record.get("gitlab") or {}
     example_id = item["id"]
     status = decision.get("status") or "undecided"
-    st.markdown(f"`{example_id}` · {status} · {gitlab.get('link') or '—'} · {gitlab.get('confidence')}")
+    st.markdown(
+        f"`{example_id}` · source {record.get('source') or 'gitlab'} · {status} · "
+        f"{gitlab.get('link') or '—'} · {gitlab.get('confidence')}"
+    )
     user_key = f"gl_user_{example_id}"
     asst_key = f"gl_asst_{example_id}"
     messages = record.get("messages") or []
@@ -335,11 +348,4 @@ def _render_example(store: GitlabStore, item: dict) -> None:
     st.markdown("---")
 
 
-def _esc(value: str) -> str:
-    return (
-        str(value)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
+render()

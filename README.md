@@ -9,7 +9,7 @@ Works with OpenCode (and other LogMiner sources: Claude Code, Cline, Codex, Qwen
 ## What you get
 
 1. **Export** — thin wrapper around [LogMiner](https://github.com/pearsonkyle/LogMiner) for OpenCode history
-2. **Viewer** — Streamlit UI with **Keep / Discard**, score filters, trajectory browser, and a **Правила** page for proposed harness rules
+2. **One Streamlit app** — `streamlit run viewer/app.py`. Shared navigation and paths: OpenCode sessions, GitLab MRs, proposals (with clusters), export, and monitoring.
 3. **Export approved** — writes only kept sessions to a clean JSONL ready for Unsloth
 4. **Proposals** — one shared list (`kind`: rule or skill, text, source session ids, status). Per-session generation and GitLab review comments write that same file, and the same viewer page approves them.
 5. **GitLab reviews** — merged MRs become SFT and DPO examples, and linked review comments can be proposed as rules through the shared proposal file.
@@ -295,7 +295,7 @@ Annotation is one JSON object per session (task type, project, tools, outcome, w
 
 A pattern becomes a **rule** only when it spans at least three task types. Otherwise it becomes a **skill**: `.opencode/skills/<id>/SKILL.md` is the portable layout (YAML `name` and `description`, then steps and examples). Conflicts with existing rule text and with the same error type on successful sessions are stored on the proposal.
 
-`recommend` writes into `data/rule_proposals.json`, the same file per-session `propose_rules` uses (`mode: per-session` drafts are replaced). Approve, edit, or reject them on the **Правила** page — there is no second approval screen. The **Паттерны** page only browses clusters (frequency, failure rate, machine, project, task type, example sessions) and jumps to that page. `--min-size 1` keeps single-session clusters for debugging.
+`recommend` writes into `data/rule_proposals.json`, the same file per-session `propose_rules` uses (`mode: per-session` drafts are replaced). Approve, edit, or reject them on the **Правила** page of `streamlit run viewer/app.py`. That page also lists clusters (frequency, failure rate, machines, example sessions) and opens the OpenCode session or the GitLab comment. The **Мониторинг** page shows before/after metrics and rollback. `--min-size 1` keeps single-session clusters for debugging.
 
 Export of approved rules and skills is `export_rules` (Markdown, JSON, and `--skills-dir`). `mine_patterns export` calls that same writer, then records the version used by `report` and `rollback`.
 
@@ -332,7 +332,7 @@ finetune-curator/
 │   ├── gitlab/               # client, store, sync, linking, anonymize
 │   └── patterns/             # multi-machine import, clusters, skills
 ├── viewer/
-│   ├── app.py                # Streamlit keep/discard + rules + GitLab
+│   ├── app.py                # one Streamlit app: sessions, GitLab, proposals, export
 │   ├── rules_page.py
 │   ├── gitlab_page.py        # stored MRs, offline process, example review
 │   ├── gitlab_panel.py       # before/after review card

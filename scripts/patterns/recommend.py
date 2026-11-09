@@ -90,6 +90,7 @@ def recommend_cluster(cluster: dict, complete_fn, *, existing_rules: list[str], 
         "session_ids": cluster.get("session_ids") or [],
         "evidence": str(payload.get("description") or "").strip(),
         "conflicts": conflicts,
+        "source": "gitlab" if any(str(name).startswith("gitlab") for name in (cluster.get("machine_names") or [])) else "opencode",
     }
 
 
