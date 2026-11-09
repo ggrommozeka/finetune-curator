@@ -6,13 +6,22 @@ import json
 from pathlib import Path
 
 from scripts.dataset.format import CHAT_TEMPLATES, render_chat
-from scripts.dataset.mix import anonymize_samples, apply_thinking, assign_splits, dedup, fit_length, manifest_block, mix_ratios
+from scripts.dataset.mix import (
+    anonymize_samples,
+    apply_thinking,
+    assign_splits,
+    dedup,
+    fit_length,
+    manifest_block,
+    mix_ratios,
+    prefer_source_models,
+)
 from scripts.dataset.tasks import from_gitlab_store, from_opencode, load_machine_labels
 from scripts.gitlab.signals import SignalConfig, load_signal_config
 
 DEFAULT_RATIOS = {"agentic": 0.5, "style": 0.25, "review": 0.25}
 LARGE_MAX_TOKENS = 32_000
-REVIEW_MAX_TOKENS = 8_192
+REVIEW_MAX_TOKENS = 16_384
 REVIEW_CONTEXT_LINES = 20
 
 
@@ -35,6 +44,9 @@ def build_samples(
     chat_template: str = "qwen3",
     review_context_lines: int | None = None,
     thinking: str = "strip",
+    source_models: set[str] | None = None,
+    model_weights: dict[str, float] | None = None,
+    conventions: str = "",
 ) -> dict:
     if chat_template not in CHAT_TEMPLATES:
         raise ValueError(f"Unknown chat template {chat_template!r}")
@@ -53,10 +65,21 @@ def build_samples(
                 gitlab_root,
                 signal_config or load_signal_config(),
                 review_context_lines=review_context_lines if tasks == {"review"} else None,
+                conventions=conventions,
+                context_tokens=max_tokens if tasks == {"review"} else 16_384,
             )
         )
     if tasks:
         samples = [sample for sample in samples if sample.task in tasks]
+    if source_models:
+        allowed = {item.lower() for item in source_models}
+        samples = [
+            sample
+            for sample in samples
+            if sample.task != "agentic"
+            or any(item in (sample.extra.get("source_model") or "").lower() for item in allowed)
+        ]
+    samples = prefer_source_models(samples, model_weights or {})
     samples = dedup(samples)
     samples = apply_thinking(samples, thinking)
     samples = fit_length(samples, max_tokens, chars_per_token)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.parse
 from datetime import datetime
 
@@ -30,8 +31,30 @@ def _diff_paths(diff: dict) -> list[str]:
     return paths
 
 
+_ISSUE_REF = re.compile(r"(?:#|issues/)(\d+)")
+
+
+def linked_issue_iids(text: str) -> list[str]:
+    found = []
+    for iid in _ISSUE_REF.findall(text or ""):
+        if iid not in found:
+            found.append(iid)
+    return found
+
+
+def _base_sha(mr: dict, commits: list[dict]) -> str:
+    refs = mr.get("diff_refs") if isinstance(mr.get("diff_refs"), dict) else {}
+    if refs.get("base_sha"):
+        return str(refs["base_sha"])
+    if commits:
+        parent = _parent_sha(commits[0])
+        if parent:
+            return parent
+    return ""
+
+
 def fetch_bundle(client, mr: dict, *, project_path: str | None = None) -> dict:
-    """Download discussions, every commit diff, and file text at the commit and its parent."""
+    """Download discussions, diffs, base-commit file snapshots, and linked issues."""
     project_id = int(mr["project_id"])
     iid = int(mr["iid"])
     base = f"/api/v4/projects/{project_id}/merge_requests/{iid}"
@@ -67,12 +90,46 @@ def fetch_bundle(client, mr: dict, *, project_path: str | None = None) -> dict:
                     if content is None:
                         continue
                     files.append({"sha": sha, "path": path, "side": side, "content": content})
+    base = _base_sha(mr, commits)
+    changed = []
+    for diffs in diffs_by_sha.values():
+        for diff in diffs or []:
+            for path in _diff_paths(diff):
+                if path not in changed:
+                    changed.append(path)
+    if base:
+        for path in changed:
+            content = client.get_text(
+                f"/api/v4/projects/{project_id}/repository/files/{quote_id(path)}/raw",
+                {"ref": base},
+            )
+            if content is None:
+                continue
+            files.append({"sha": base, "path": path, "side": "base", "content": content})
+    issues = []
+    for iid in linked_issue_iids(str(mr.get("description") or "")):
+        try:
+            _status, _headers, payload = client.request_json(
+                "GET", f"/api/v4/projects/{project_id}/issues/{iid}"
+            )
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            issues.append(
+                {
+                    "iid": payload.get("iid") or iid,
+                    "title": payload.get("title") or "",
+                    "description": payload.get("description") or "",
+                }
+            )
     return {
         "mr": mr,
         "discussions": discussions,
         "commits": commits,
         "diffs_by_sha": diffs_by_sha,
         "files": files,
+        "issues": issues,
+        "base_sha": base,
         "project_path": project_path or "",
     }
 
@@ -120,6 +177,7 @@ def sync_store(
             bundle["diffs_by_sha"],
             bundle["files"],
             project_path=path,
+            issues=bundle.get("issues") or [],
         )
         seen.add((project_id, iid))
         if forced:
@@ -152,6 +210,7 @@ def sync_store(
             bundle["diffs_by_sha"],
             bundle["files"],
             project_path=path,
+            issues=bundle.get("issues") or [],
         )
         stats["refreshed"] += 1
     return stats

@@ -147,15 +147,36 @@ def mix_ratios(samples: list[Sample], ratios: dict[str, float]) -> list[Sample]:
     return picked
 
 
+def prefer_source_models(samples: list[Sample], weights: dict[str, float]) -> list[Sample]:
+    """Sort so higher-weighted source models are kept first when a task is downsampled."""
+    if not weights:
+        return samples
+
+    def rank(sample: Sample) -> tuple:
+        label = (sample.extra.get("source_model") or "").lower()
+        weight = 1.0
+        for pattern, value in weights.items():
+            needle = pattern.lower().rstrip("*")
+            if needle and needle in label:
+                weight = max(weight, float(value))
+        return (-weight, sample.id)
+
+    return sorted(samples, key=rank)
+
+
 def manifest_block(samples: list[Sample]) -> dict:
     by_task: dict[str, int] = defaultdict(int)
     by_source: dict[str, int] = defaultdict(int)
     by_machine: dict[str, int] = defaultdict(int)
+    by_source_model: dict[str, int] = defaultdict(int)
     dpo = 0
     for sample in samples:
         by_task[sample.task] += 1
         by_source[sample.source] += 1
         by_machine[sample.machine or "unknown"] += 1
+        model = sample.extra.get("source_model") or ""
+        if model:
+            by_source_model[model] += 1
         if sample.dpo:
             dpo += 1
     return {
@@ -164,4 +185,5 @@ def manifest_block(samples: list[Sample]) -> dict:
         "by_task": dict(sorted(by_task.items())),
         "by_source": dict(sorted(by_source.items())),
         "by_machine": dict(sorted(by_machine.items())),
+        "by_source_model": dict(sorted(by_source_model.items())),
     }

@@ -78,10 +78,10 @@ def render() -> None:
         "agentic и style — Qwen3 27B, шаблон qwen3, до 32k токенов. "
         "review — отдельный датасет для модели ~9B."
     )
-    dataset_task = st.selectbox("Задача", ["all", "agentic", "style", "review"], key="finetune_task")
+    dataset_task = st.selectbox("Задача", ["all", "author", "agentic", "style", "review"], key="finetune_task")
     chat_template = st.selectbox("Chat template", ["qwen3", "chatml", "llama3", "gemma"], key="finetune_template")
     output_dir = st.text_input("Output dir", value=f"data/finetune/{dataset_task}", key=f"finetune_dir_{dataset_task}")
-    token_default = 8192 if dataset_task == "review" else 32000
+    token_default = 16384 if dataset_task == "review" else 32000
     max_tokens = st.number_input(
         "Макс. токенов",
         min_value=256,

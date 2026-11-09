@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from scripts.dataset.context import review_context
 from scripts.dataset.format import clip_diff_context, split_messages, to_tool_message
 from scripts.gitlab.classify import classify_commits
 from scripts.gitlab.link import parse_hunks
 from scripts.gitlab.polish import iter_hunks
 from scripts.gitlab.signals import SignalConfig, load_signal_config
 from scripts.gitlab.trace import build_traces, extract_anchor
-from scripts.rules.sessions import load_jsonl, load_review_decisions, normalize_messages, session_id
+from scripts.rules.sessions import load_jsonl, load_review_decisions, normalize_messages, session_id, source_model_info
 
 AGENTIC_SYSTEM = (
     "You are a coding agent in OpenCode. Complete the user's task. "
@@ -232,6 +233,7 @@ def review_comment_sample(
     line_end,
     suggested: str = "",
     context_lines: int | None = None,
+    context: str = "",
 ) -> Sample | None:
     if not comment.strip():
         return None
@@ -242,11 +244,14 @@ def review_comment_sample(
     lines = ""
     if line_start:
         lines = f"{line_start}-{line_end or line_start}"
-    user = (
-        "Review this diff. Name the file and lines when you comment.\n\n"
-        f"File: {file_name or '(file)'}\n"
-        f"```diff\n{diff}\n```"
-    )
+    if context.strip():
+        user = "Review this change. Name the file and lines when you comment.\n\n" + context.strip()
+    else:
+        user = (
+            "Review this diff. Name the file and lines when you comment.\n\n"
+            f"File: {file_name or '(file)'}\n"
+            f"```diff\n{diff}\n```"
+        )
     body = f"{file_name}:{lines}: {comment.strip()}" if lines else comment.strip()
     if suggested.strip():
         body += f"\n\nSuggested fix:\n```\n{suggested.strip()}\n```"
@@ -358,7 +363,12 @@ def from_opencode(path, decisions_path, *, machines: dict[str, str], min_score: 
     samples = []
     for record in load_jsonl(Path(path)):
         machine = _machine_for(record, machines)
-        samples.extend(agentic_samples(record, machine=machine, success=_success(record, labels, min_score)))
+        info = source_model_info(record)
+        produced = agentic_samples(record, machine=machine, success=_success(record, labels, min_score))
+        for sample in produced:
+            sample.extra["source_model"] = info["label"]
+            sample.extra["source_provider"] = info["provider"]
+        samples.extend(produced)
     return samples
 
 
@@ -377,6 +387,8 @@ def from_gitlab_bundle(
     *,
     machine: str = "gitlab",
     review_context_lines: int | None = None,
+    conventions: str = "",
+    context_tokens: int = 16_384,
 ) -> list[Sample]:
     mr = bundle.get("mr") or {}
     project_id = mr.get("project_id")
@@ -389,6 +401,12 @@ def from_gitlab_bundle(
         discussions, commits, diffs, mr, files=bundle.get("files") or []
     )
     samples: list[Sample] = []
+    base_files = {
+        item.get("path") or "": item.get("content") or ""
+        for item in (bundle.get("files") or [])
+        if item.get("side") == "base"
+    }
+    issues = bundle.get("issues") or []
     roles = {row["sha"]: row for row in classify_commits(commits, mr, discussions, config)}
     for commit in commits:
         sha = str(commit.get("id") or commit.get("sha") or "")
@@ -429,6 +447,20 @@ def from_gitlab_bundle(
             if sample:
                 samples.append(sample)
         diff = trace.get("diff") or trace.get("before") or ""
+        line_start = anchor.get("new_line_start") or anchor.get("old_line_start")
+        line_end = anchor.get("new_line_end") or anchor.get("old_line_end")
+        packed = ""
+        if diff or file_name:
+            packed = review_context(
+                diff=clip_diff_context(diff, line_start, line_end, review_context_lines) if review_context_lines else diff,
+                title=str(mr.get("title") or ""),
+                description=str(mr.get("description") or ""),
+                issues=issues,
+                base_file=base_files.get(file_name) or "",
+                line_start=line_start,
+                conventions=conventions,
+                max_tokens=context_tokens,
+            )
         review = review_comment_sample(
             sample_id=f"review-{project_id}-{iid}-{trace.get('note_id')}",
             group=group,
@@ -437,10 +469,11 @@ def from_gitlab_bundle(
             diff=diff,
             comment=trace.get("body") or "",
             reviewer=trace.get("reviewer") or trace.get("author_username") or "",
-            line_start=(anchor.get("new_line_start") or anchor.get("old_line_start")),
-            line_end=(anchor.get("new_line_end") or anchor.get("old_line_end")),
+            line_start=line_start,
+            line_end=line_end,
             suggested=trace.get("after") or "",
-            context_lines=review_context_lines,
+            context_lines=None,
+            context=packed,
         )
         if review:
             samples.append(review)
@@ -495,7 +528,14 @@ def from_gitlab_bundle(
     return samples
 
 
-def from_gitlab_store(root, config: SignalConfig | None = None, *, review_context_lines: int | None = None) -> list[Sample]:
+def from_gitlab_store(
+    root,
+    config: SignalConfig | None = None,
+    *,
+    review_context_lines: int | None = None,
+    conventions: str = "",
+    context_tokens: int = 16_384,
+) -> list[Sample]:
     from pathlib import Path
 
     root = Path(root)
@@ -513,7 +553,15 @@ def from_gitlab_store(root, config: SignalConfig | None = None, *, review_contex
             if bundle is None:
                 continue
             bundle["traces"] = store.traces_for(row["project_id"], row["iid"])
-            samples.extend(from_gitlab_bundle(bundle, config, review_context_lines=review_context_lines))
+            samples.extend(
+                from_gitlab_bundle(
+                    bundle,
+                    config,
+                    review_context_lines=review_context_lines,
+                    conventions=conventions,
+                    context_tokens=context_tokens,
+                )
+            )
         return samples
     finally:
         store.close()

@@ -324,7 +324,7 @@ Agentic and style target the Qwen3-family 27B served with llama.cpp (about 200k 
 
 `--agentic`, `--style`, and `--review` are mixing weights for `--task all`. Held-out rows are chosen by session id or MR id, so one session or MR never appears in both `train.jsonl` and `eval.jsonl`. `--anonymize` strips emails and URLs. `manifest.json` counts rows by task, source, and machine and records `chat_template`, `thinking`, and `target_model`.
 
-Each task is also its own dataset. `--task agentic` and `--task style` stay on the 27B defaults above. Review is the set for a separate ~9B review model: `--task review` writes only review SFT and DPO, plus the held-out eval, and defaults to 8192 tokens (raise it toward 16384 if that 9B was trained with a longer context). Diffs keep `--review-context-lines` (default 20) on each side of the comment instead of the whole hunk. `--chat-template` can be `chatml`, `llama3`, or `gemma` for that smaller model. The messages stay in the OpenAI tool-calling schema; the template name is what Unsloth should apply.
+Each task is also its own dataset. `--task agentic` and `--task style` stay on the 27B defaults above. Review is the set for a separate ~9B review model: `--task review` writes only review SFT and DPO, plus the held-out eval, and defaults to 16384 tokens. Diffs keep `--review-context-lines` (default 20) on each side of the comment instead of the whole hunk. `--chat-template` can be `chatml`, `llama3`, or `gemma` for that smaller model. The messages stay in the OpenAI tool-calling schema; the template name is what Unsloth should apply.
 
 ```bash
 python -m scripts.build_dataset \
@@ -344,7 +344,7 @@ python -m scripts.build_dataset --task agentic --output-dir data/finetune/agenti
 python -m scripts.build_dataset --task style --output-dir data/finetune/style \
   --chat-template qwen3 --thinking strip --max-tokens 32000
 python -m scripts.build_dataset --task review --output-dir data/finetune/review \
-  --chat-template qwen3 --max-tokens 8192 --review-context-lines 20
+  --chat-template qwen3 --max-tokens 16384 --review-context-lines 20
 ```
 
 The same controls are on the **Экспорт** page of `streamlit run viewer/app.py`.
@@ -429,7 +429,11 @@ llama-server -m qwen3-27b-q5_k_xl.gguf --lora adapter.gguf --jinja -c 200000 \
 
 `--jinja` applies the Qwen3 chat template stored in the GGUF, including tool calls. A dataset built with `--thinking strip` should be served with thinking disabled (`chat_template_kwargs.enable_thinking` false, or the server's equivalent). A dataset built with `--thinking keep` should leave thinking on.
 
-Score the held-out file against a live server with `python -m scripts.eval_dataset --eval data/finetune/eval.jsonl`. Add `--judge` to let that server decide whether a predicted review matches the real comment. Without `--judge`, review matches are lexical and style similarity is a text ratio.
+Score the held-out file with `python -m scripts.eval_dataset --eval data/finetune/eval.jsonl`. Model A reports the user-correction rate (completions closer to the uncorrected step than to the corrected one) and the review-comment rate on the code it wrote. Model B reports comment match precision/recall and the false-positive rate on hunks that passed review with no comments. Add `--judge` to let the server decide whether a predicted review matches the real comment.
+
+Approved rules and skills stay the harness next to Model A: export them with `export_rules` and put the rules in the system prompt or `.opencode/skills`. The review packer also inserts the approved rule text as a short conventions section when `data/rule_proposals.json` is present.
+
+Stage 2 for Model B is a later change: agentic review with read-only tools, distilled from 27B review trajectories that match real comments and are approved in the viewer. This export is stage 1 only, with the context already assembled.
 
 ## Layout
 

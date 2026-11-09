@@ -86,12 +86,16 @@ def _rows_from_v2(conn: sqlite3.Connection) -> list[dict]:
             content = payload.get("text") or payload.get("content") or payload.get("output") or ""
             if content:
                 messages.append({"role": str(role), "content": _text(content)})
+        model = ""
+        if "model" in keys and session["model"]:
+            model = session["model"]
         records.append(
             {
                 "id": str(sid),
                 "title": session[title_col] if title_col else "",
                 "project": str(session[project_col]) if project_col else "",
                 "created_at": str(session[created_col]) if created_col else "",
+                "model": model,
                 "messages": messages,
             }
         )

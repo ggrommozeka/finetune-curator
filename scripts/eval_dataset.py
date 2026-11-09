@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-from scripts.dataset.evaluate import load_jsonl, review_metrics, style_metrics
+from scripts.dataset.evaluate import author_metrics, false_positive_rate, load_jsonl, review_metrics, style_metrics
 from scripts.rules.endpoint import resolve_endpoint
 from scripts.rules.llm import chat_complete, thinking_controls
 
@@ -35,6 +35,7 @@ def _live_complete():
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Evaluate held-out review and style samples.")
     parser.add_argument("--eval", default="data/finetune/eval.jsonl")
+    parser.add_argument("--eval-dpo", default=None, help="DPO jsonl for Model A correction rate. Defaults to eval_dpo.jsonl next to --eval.")
     parser.add_argument("--mock-response", default=None, help="Canned model reply. No network.")
     parser.add_argument("--judge", action="store_true", help="Ask the same client to judge matches.")
     args = parser.parse_args(argv)
@@ -52,7 +53,16 @@ def main(argv: list[str] | None = None) -> None:
     else:
         complete = _live_complete()
         judge = complete if args.judge else None
-    report = {"review": review_metrics(rows, complete, judge), "style": style_metrics(rows, complete, judge)}
+    dpo_path = Path(args.eval_dpo) if args.eval_dpo else path.with_name("eval_dpo.jsonl")
+    dpo_rows = load_jsonl(dpo_path) if dpo_path.exists() else []
+    report = {
+        "model_a": author_metrics(dpo_rows, rows, complete),
+        "model_b": {
+            **review_metrics(rows, complete, judge),
+            **false_positive_rate(rows, complete),
+        },
+        "style": style_metrics(rows, complete, judge),
+    }
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

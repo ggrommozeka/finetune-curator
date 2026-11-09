@@ -146,6 +146,61 @@ def style_metrics(rows: list[dict], complete_fn, judge_fn=None) -> dict:
     return {"mean_similarity": mean, "samples": len(scores)}
 
 
+def false_positive_rate(rows: list[dict], complete_fn) -> dict:
+    """Share of clean hunks where the reviewer still writes a comment."""
+    negatives = [row for row in rows if row.get("kind") == "review-negative"]
+    flagged = 0
+    for row in negatives:
+        prompt = [message for message in row.get("messages") or [] if message.get("role") != "assistant"]
+        prediction = _generate(complete_fn, prompt)
+        if "no issues" not in prediction.lower():
+            flagged += 1
+    rate = round(flagged / len(negatives), 3) if negatives else 0.0
+    return {"false_positive_rate": rate, "samples": len(negatives), "flagged": flagged}
+
+
+def author_metrics(dpo_rows: list[dict], sft_rows: list[dict], complete_fn) -> dict:
+    """Model A: how often a completion matches the uncorrected step, and how often its code draws a review comment."""
+    failures = 0
+    graded = 0
+    for row in dpo_rows:
+        if row.get("task") not in {"agentic", "style"}:
+            continue
+        chosen = ((row.get("chosen") or [{}])[-1].get("content") or "")
+        rejected = ((row.get("rejected") or [{}])[-1].get("content") or "")
+        if not chosen or not rejected:
+            continue
+        prediction = _generate(complete_fn, row.get("prompt") or [])
+        graded += 1
+        if style_ratio(rejected, prediction) > style_ratio(chosen, prediction):
+            failures += 1
+    flagged = 0
+    reviewed = 0
+    for row in sft_rows:
+        if row.get("task") not in {"agentic", "style"}:
+            continue
+        code = ""
+        for message in reversed(row.get("messages") or []):
+            if message.get("role") == "assistant":
+                code = message.get("content") or ""
+                break
+        if not code.strip():
+            continue
+        prediction = _generate(
+            complete_fn,
+            [{"role": "user", "content": "Review this code. If it is fine, reply exactly: No issues.\n\n" + code[:4000]}],
+        )
+        reviewed += 1
+        if "no issues" not in prediction.lower():
+            flagged += 1
+    return {
+        "user_correction_rate": round(failures / graded, 3) if graded else 0.0,
+        "review_comment_rate": round(flagged / reviewed, 3) if reviewed else 0.0,
+        "correction_samples": graded,
+        "reviewed_samples": reviewed,
+    }
+
+
 def load_jsonl(path) -> list[dict]:
     rows = []
     text = path.read_text(encoding="utf-8") if hasattr(path, "read_text") else ""

@@ -56,6 +56,38 @@ def load_review_decisions(path: Path) -> dict:
     return {"labels": labels, "notes": notes}
 
 
+def source_model_info(record: dict) -> dict:
+    """Provider and model that produced an OpenCode session, when the export recorded them."""
+    provider = ""
+    name = ""
+    model = record.get("model")
+    if isinstance(model, dict):
+        provider = str(model.get("providerID") or model.get("provider") or model.get("provider_id") or "")
+        name = str(model.get("modelID") or model.get("model_id") or model.get("id") or model.get("name") or "")
+    elif isinstance(model, str) and model.strip():
+        text = model.strip()
+        if "/" in text:
+            provider, name = text.split("/", 1)
+        else:
+            name = text
+    if not provider:
+        provider = str(record.get("provider") or record.get("providerID") or record.get("provider_id") or "")
+    if not name:
+        name = str(record.get("model_id") or record.get("modelID") or "")
+    info = record.get("info") if isinstance(record.get("info"), dict) else {}
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    for blob in (info, metadata):
+        nested = blob.get("model")
+        if isinstance(nested, dict):
+            provider = provider or str(nested.get("providerID") or nested.get("provider") or "")
+            name = name or str(nested.get("modelID") or nested.get("id") or "")
+        elif isinstance(nested, str) and not name:
+            name = nested
+        provider = provider or str(blob.get("provider") or "")
+    label = "/".join(part for part in (provider.strip(), name.strip()) if part)
+    return {"provider": provider.strip(), "model": name.strip(), "label": label}
+
+
 def session_id(rec: dict) -> str:
     return str(
         rec.get("id")

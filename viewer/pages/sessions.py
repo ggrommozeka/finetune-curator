@@ -11,7 +11,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.rules.sessions import first_user_preview, load_jsonl, load_review_decisions, normalize_messages, session_id
+from scripts.rules.sessions import (
+    first_user_preview,
+    load_jsonl,
+    load_review_decisions,
+    normalize_messages,
+    session_id,
+    source_model_info,
+)
 from shared import esc, label_pill, queue_session_pos, render_message, save_json, status_pill, widget_value
 
 
@@ -67,6 +74,7 @@ def render() -> None:
         status_filter = st.multiselect("Статус", ["undecided", "keep", "discard"], key="status_filter", **status_kwargs)
         only_tools = st.checkbox("Только с tool calls", key="only_tools", **widget_value("only_tools", False))
         query = st.text_input("Поиск в user-тексте", key="query", **widget_value("query", ""))
+        model_query = st.text_input("Модель-источник", key="source_model", **widget_value("source_model", ""))
 
         filtered = []
         for row in rows:
@@ -81,6 +89,8 @@ def render() -> None:
             if only_tools and not any(message.get("tool_calls") for message in messages if message.get("role") == "assistant"):
                 continue
             if query and query.lower() not in first_user_preview(messages, 500).lower():
+                continue
+            if model_query and model_query.lower() not in source_model_info(row)["label"].lower():
                 continue
             filtered.append(row)
 
@@ -120,7 +130,8 @@ def render() -> None:
         <p class="hero-sub">{esc(first_user_preview(messages, 140))}</p>
         <div style="margin-top:10px"><span class="pill pill-score">score {esc(str(record.get('score', '—')))}</span>
         {label_pill(str(record.get('label', '—')))} {status_pill(current)}
-        <span class="pill pill-score">opencode</span></div></div>""",
+        <span class="pill pill-score">opencode</span>
+        <span class="pill pill-score">{esc(source_model_info(record)["label"] or "model unknown")}</span></div></div>""",
         unsafe_allow_html=True,
     )
     metrics = record.get("metrics") or {}

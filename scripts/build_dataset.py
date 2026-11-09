@@ -19,7 +19,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gitlab-store", default="data/gitlab")
     parser.add_argument("--patterns-store", default="data/patterns", help="Optional machine labels")
     parser.add_argument("--output-dir", default="data/finetune")
-    parser.add_argument("--task", choices=["all", "agentic", "style", "review"], default="all")
+    parser.add_argument("--task", choices=["all", "author", "agentic", "style", "review"], default="all")
+    parser.add_argument("--source-model", action="append", default=None, help="Keep OpenCode trajectories whose model label contains this text. Repeatable.")
+    parser.add_argument("--model-weight", action="append", default=None, help="pattern=weight, for example claude=3. Preferred models are kept first.")
     parser.add_argument(
         "--chat-template",
         choices=list(CHAT_TEMPLATES),
@@ -59,9 +61,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _conventions(args) -> str:
+    path = Path("data/rule_proposals.json")
+    decisions = Path("data/rule_decisions.json")
+    if not path.exists():
+        return ""
+    from scripts.rules.store import approved_rules, load_proposals, load_rule_decisions
+
+    rules = approved_rules(load_proposals(path), load_rule_decisions(decisions))
+    return "\n".join(f"- {rule['text']}" for rule in rules[:12])
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    tasks = None if args.task == "all" else {args.task}
+    if args.task == "author":
+        tasks = {"agentic", "style"}
+    elif args.task == "all":
+        tasks = None
+    else:
+        tasks = {args.task}
+    weights = {}
+    for item in args.model_weight or []:
+        if "=" not in item:
+            raise SystemExit(f"--model-weight must look like claude=3, got {item}")
+        pattern, value = item.split("=", 1)
+        weights[pattern.strip()] = float(value)
     if args.max_tokens is None:
         args.max_tokens = REVIEW_MAX_TOKENS if args.task == "review" else LARGE_MAX_TOKENS
     ratios = {"agentic": args.agentic, "style": args.style, "review": args.review}
@@ -91,6 +115,9 @@ def main(argv: list[str] | None = None) -> None:
         chat_template=args.chat_template,
         review_context_lines=args.review_context_lines if args.task == "review" else None,
         thinking=args.thinking,
+        source_models=set(args.source_model or []) or None,
+        model_weights=weights,
+        conventions=_conventions(args),
     )
     written = write_dataset(result, Path(args.output_dir))
     print(json.dumps({"manifest": result["manifest"], "files": written}, ensure_ascii=False, indent=2))

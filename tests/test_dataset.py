@@ -365,18 +365,60 @@ def test_review_export_is_short_and_template_is_selectable(tmp_path: Path):
     )
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["chat_template"] == "llama3"
-    assert manifest["max_tokens"] == 8192
+    assert manifest["max_tokens"] == 16384
     assert manifest["tasks"] == ["review"]
     assert "<|start_header_id|>system<|end_header_id|>" in manifest["template_preview"]
     rows = [json.loads(line) for line in (out / "train.jsonl").read_text(encoding="utf-8").splitlines()]
     assert rows
     assert {row["task"] for row in rows} == {"review"}
     for row in rows:
-        assert sequence_tokens(row["messages"], 3.0) <= 8192
+        assert sequence_tokens(row["messages"], 3.0) <= 16384
     dpo = (out / "train_dpo.jsonl").read_text(encoding="utf-8").strip()
     assert dpo
     rendered = render_chat([{"role": "user", "content": "hi"}], "gemma")
     assert rendered.startswith("<start_of_turn>user\n")
+
+
+def test_review_context_source_model_and_author_metrics():
+    from scripts.dataset.context import function_at, pack_sections, review_context
+    from scripts.dataset.evaluate import author_metrics, false_positive_rate
+    from scripts.rules.sessions import source_model_info
+
+    info = source_model_info({"model": {"providerID": "anthropic", "modelID": "claude-sonnet"}})
+    assert info["label"] == "anthropic/claude-sonnet"
+    code = "def helper():\n    return parse_config(raw)\n\ndef parse_config(raw):\n    return raw\n"
+    assert function_at(code, 1).startswith("def helper")
+    packed = review_context(
+        diff="@@ -1 +1 @@\n-old_name\n+parse_config()\n",
+        title="Parser",
+        description="Closes #4",
+        issues=[{"iid": 4, "title": "Rename", "description": "use parse_config"}],
+        base_file=code,
+        line_start=1,
+        conventions="- Name helpers after what they return.",
+        max_tokens=500,
+    )
+    assert "Parser" in packed
+    assert "parse_config" in packed
+    assert "Name helpers" in packed
+    tiny = pack_sections([(1, "Diff", "x" * 30), (2, "Later", "y" * 500)], max_tokens=20)
+    assert "Diff" in tiny
+    assert "Later" not in tiny
+    dpo = [
+        {
+            "task": "agentic",
+            "prompt": [{"role": "user", "content": "fix"}],
+            "chosen": [{"role": "assistant", "content": "fixed correctly"}],
+            "rejected": [{"role": "assistant", "content": "still wrong"}],
+        }
+    ]
+    sft = [{"task": "style", "messages": [{"role": "assistant", "content": "def parse_config():\n    return 1\n"}]}]
+    metrics = author_metrics(dpo, sft, lambda _messages: "still wrong")
+    assert metrics["user_correction_rate"] == 1.0
+    negatives = [
+        {"kind": "review-negative", "messages": [{"role": "user", "content": "diff"}, {"role": "assistant", "content": "No issues."}]}
+    ]
+    assert false_positive_rate(negatives, lambda _messages: "This leaks a secret.")["false_positive_rate"] == 1.0
 
 
 def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Path):
