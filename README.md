@@ -1,5 +1,59 @@
 # finetune-curator
 
+## Цели
+
+Пайплайн собирает историю работы агента и ревью в GitLab в два набора для дообучения и в правила, которыми агент пользуется сразу.
+
+Две модели:
+
+- **Модель A, автор кода, около 27B.** Базовый чекпоинт `Qwen/Qwen3.8-27B`. Учится на успешных траекториях OpenCode, на парах DPO из правок пользователя и на стиле проекта: полировка тимлида и правки после комментария ревьюера. В системный промпт и в `.opencode/skills` рядом с ней кладутся одобренные правила и навыки.
+- **Модель B, ревьюер, около 9B.** Кандидаты: `Qwen/Qwen3.5-9B` и `deepreinforce-ai/Ornith-1.0-9B`. Этап 1: модель видит уже собранный контекст (дифф, описание MR, связанные задачи, код на базовом коммите, определения символов, одобренные правила) и пишет комментарий. Агентное ревью с инструментами только на чтение — отдельная будущая задача.
+
+Правила и навыки — третий результат, не третья модель. Правило — короткая императивная инструкция для системного промпта или `AGENTS.md`. Навык — пошаговый сценарий под один тип задачи в формате OpenCode `SKILL.md`. Оба живут в одном файле предложений и проходят одну страницу одобрения.
+
+На этой ветке готовы выгрузка OpenCode (с меткой машины `--machine`), просмотр сессий и предложения правил с одной сессии (`mode: per-session`). GitLab, кластеры по корпусу и отдельные датасеты двух моделей добавляются следующими изменениями. Оценка LogMiner — структурный фильтр, а не метка «сессия удалась».
+
+## Архитектура
+
+Один процесс Streamlit (`streamlit run viewer/app.py`) и один файл предложений. Отдельного второго пайплайна для правил нет. Режим «предложение с одной сессии» (`mode: per-session`) — частный случай. Корпусный разбор позже пишет в тот же `data/rule_proposals.json`.
+
+```mermaid
+flowchart TD
+  subgraph machines [Три машины OpenCode]
+    M1[Экспорт JSONL с --machine]
+    M2[Экспорт JSONL с --machine]
+    M3[Экспорт JSONL с --machine]
+  end
+  GL[GitLab: sync один раз]
+  Store[(data/gitlab)]
+  Patterns[(data/patterns)]
+  Viewer[Streamlit: Сессии, GitLab, Правила, Экспорт, Мониторинг]
+  Props[data/rule_proposals.json]
+  Rules[Правила Markdown и навыки SKILL.md]
+  DS[Датасеты двух моделей]
+  A[Модель A Qwen3.8-27B]
+  B[Модель B около 9B]
+
+  M1 --> Viewer
+  M2 --> Patterns
+  M3 --> Patterns
+  GL --> Store
+  Store --> Viewer
+  Store --> Patterns
+  Viewer --> Props
+  Patterns --> Props
+  Props --> Rules
+  Viewer --> DS
+  Store --> DS
+  Rules --> A
+  DS --> A
+  DS --> B
+```
+
+Границы, к которым сходится код: `ingest` (OpenCode и GitLab), `llm` (общий клиент), `analysis` (кластеры), `proposals` (один файл предложений), `datasets`, `training`, `viewer`. На этой ветке клиент, предложения и просмотр сессий лежат в `scripts/rules`, `scripts/export_opencode.py` и `viewer/`.
+
+## What this branch does
+
 Pipeline: **LogMiner export → visual review (keep/discard) → export only approved** for Unsloth / SFT.
 
 The same review pass can mine a second artifact: **harness rules** for the agent system prompt or `AGENTS.md` (mistakes, user corrections, loops, tool misuse).
@@ -32,7 +86,7 @@ pip install "git+https://github.com/pearsonkyle/LogMiner.git"
 
 ```bash
 # Keep all scores for manual review
-python -m scripts.export_opencode --output data/raw_scored.jsonl --min-score 0.0
+python -m scripts.export_opencode --output data/raw_scored.jsonl --min-score 0.0 --machine laptop-a
 ```
 
 OpenCode data is read from `~/.local/share/opencode` by default (override with `--input`).

@@ -44,6 +44,7 @@ def normalize_proposal(item: dict) -> dict:
         "steps": [str(step) for step in steps if str(step).strip()],
         "examples": [str(example) for example in examples if str(example).strip()],
         "conflicts": [str(conflict) for conflict in (item.get("conflicts") or [])],
+        "mode": str(item.get("mode") or ""),
         "source": str(item.get("source") or "opencode"),
     }
 
