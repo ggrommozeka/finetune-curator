@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from scripts.rules.merge import category_heading, category_rank
-from scripts.rules.store import approved_rules, load_proposals, load_rule_decisions, public_rule
+from scripts.rules.skills import write_skill
+from scripts.rules.store import approved_proposals, approved_rules, load_proposals, load_rule_decisions, public_rule
 
 
 def render_markdown(rules: list[dict]) -> str:
@@ -57,7 +58,16 @@ def export_approved(
     json_path.write_text(render_json(rules), encoding="utf-8")
     return {
         "approved": len(rules),
-        "proposed": len(proposals.get("rules") or []),
+        "proposed": len(proposals.get("proposals") or proposals.get("rules") or []),
         "markdown": str(markdown_path),
         "json": str(json_path),
     }
+
+
+def export_skills(proposals_path: Path, decisions_path: Path, skills_dir: Path) -> dict:
+    """Write approved skill proposals as OpenCode SKILL.md directories."""
+    proposals = load_proposals(proposals_path)
+    decisions = load_rule_decisions(decisions_path)
+    skills = approved_proposals(proposals, decisions, kind="skill")
+    written = [str(write_skill(skills_dir, skill)) for skill in skills]
+    return {"skills": len(written), "paths": written}

@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.rules.export import export_approved, render_markdown
+from scripts.rules.export import export_approved, export_skills, render_markdown
 from scripts.rules.store import (
     approved_rules,
     load_rule_decisions,
@@ -95,6 +95,7 @@ def test_export_formats(tmp_path: Path):
     rule = document["rules"][0]
     assert rule == {
         "id": "r_loop",
+        "kind": "rule",
         "text": "EDITED RULE",
         "category": "looping",
         "rationale": "it looped",
@@ -102,6 +103,40 @@ def test_export_formats(tmp_path: Path):
         "evidence": "EVIDENCE_LOOP",
     }
     assert render_markdown([]).startswith("# Agent harness rules\n")
+
+
+def test_skill_proposal_exports_as_skill_md_not_agents_rules(tmp_path: Path):
+    proposals = tmp_path / "proposals.json"
+    decisions = tmp_path / "decisions.json"
+    proposals.write_text(
+        json.dumps(
+            {
+                "proposals": [
+                    {
+                        "id": "p_skill",
+                        "kind": "skill",
+                        "title": "Retry failed tests",
+                        "text": "Read the pytest error before running it again.",
+                        "description": "Use when a Python test command fails.",
+                        "steps": ["Read the error", "Change the command"],
+                        "session_ids": ["s1"],
+                        "evidence": "user: stop",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    save_rule_decisions(decisions, {"statuses": {"p_skill": "approved"}, "edits": {}})
+    markdown = tmp_path / "rules.md"
+    export_approved(proposals, decisions, markdown, tmp_path / "rules.json")
+    assert "_No approved rules._" in markdown.read_text(encoding="utf-8")
+    skills = export_skills(proposals, decisions, tmp_path / "skills")
+    assert skills["skills"] == 1
+    text = Path(skills["paths"][0]).read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    assert "name: retry-failed-tests" in text
+    assert "description:" in text
 
 
 def _clean_env(**extra):
