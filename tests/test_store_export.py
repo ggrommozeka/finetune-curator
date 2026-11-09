@@ -6,8 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.rules.export import export_approved, export_skills, render_markdown
-from scripts.rules.store import (
+from scripts.proposals.export import export_approved, export_skills, render_markdown
+from scripts.proposals.store import (
     approved_rules,
     load_rule_decisions,
     save_rule_decisions,

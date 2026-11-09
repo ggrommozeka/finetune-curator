@@ -12,15 +12,15 @@ import json
 import os
 from pathlib import Path
 
-from scripts.patterns.annotate import annotate_pending
-from scripts.patterns.cluster import cluster_annotations, embed_texts
-from scripts.patterns.import_sources import import_gitlab_traces, import_path
-from scripts.patterns.monitor import report, rollback, snapshot_version
-from scripts.patterns.recommend import recommend_pending
-from scripts.patterns.store import PatternStore
-from scripts.rules.export import export_approved, export_skills
+from scripts.analysis.annotate import annotate_pending
+from scripts.analysis.cluster import cluster_annotations, embed_texts
+from scripts.analysis.import_sources import import_gitlab_traces, import_path
+from scripts.analysis.monitor import report, rollback, snapshot_version
+from scripts.analysis.recommend import recommend_pending
+from scripts.analysis.store import PatternStore
+from scripts.proposals.export import export_approved, export_skills
 from scripts.rules.llm import chat_complete, thinking_controls
-from scripts.rules.parsing import ModelOutputError
+from scripts.llm.parsing import ModelOutputError
 
 
 def _store(path: str) -> PatternStore:
@@ -35,7 +35,7 @@ def _complete_from_args(args):
             return raw
 
         return complete, "mock"
-    from scripts.rules.endpoint import fetch_model_ids, pick_remote_model, resolve_endpoint
+    from scripts.llm.endpoint import fetch_model_ids, pick_remote_model, resolve_endpoint
 
     endpoint = resolve_endpoint(
         cli_base_url=args.base_url,

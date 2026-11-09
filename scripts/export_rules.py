@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from scripts.rules.export import export_approved, export_skills
+from scripts.proposals.export import export_approved, export_skills
 
 
 def main(argv: list[str] | None = None) -> None:

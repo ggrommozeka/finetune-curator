@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.rules.sessions import (
+from scripts.ingest.opencode_sessions import (
     first_user_preview,
     load_jsonl,
     load_review_decisions,

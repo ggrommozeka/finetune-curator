@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 
-from scripts.dataset.smoke import load_profile, simulate_smoke, unsloth_smoke
+from scripts.training.smoke import load_profile, simulate_smoke, unsloth_smoke
 
 
 def main(argv: list[str] | None = None) -> None:

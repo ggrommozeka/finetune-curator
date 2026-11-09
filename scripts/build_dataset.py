@@ -7,9 +7,9 @@ import argparse
 import json
 from pathlib import Path
 
-from scripts.dataset.build import LARGE_MAX_TOKENS, REVIEW_CONTEXT_LINES, REVIEW_MAX_TOKENS, build_samples, write_dataset
-from scripts.dataset.format import CHAT_TEMPLATES
-from scripts.gitlab.signals import load_signal_config
+from scripts.datasets.build import LARGE_MAX_TOKENS, REVIEW_CONTEXT_LINES, REVIEW_MAX_TOKENS, build_samples, write_dataset
+from scripts.datasets.format import CHAT_TEMPLATES
+from scripts.ingest.gitlab.signals import load_signal_config
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,7 +73,7 @@ def _conventions(args) -> str:
     decisions = Path("data/rule_decisions.json")
     if not path.exists():
         return ""
-    from scripts.rules.store import approved_rules, load_proposals, load_rule_decisions
+    from scripts.proposals.store import approved_rules, load_proposals, load_rule_decisions
 
     rules = approved_rules(load_proposals(path), load_rule_decisions(decisions))
     return "\n".join(f"- {rule['text']}" for rule in rules[:12])

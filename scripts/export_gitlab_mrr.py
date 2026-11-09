@@ -15,11 +15,11 @@ import os
 import sys
 from pathlib import Path
 
-from scripts.gitlab.client import FixtureTransport, GitLabClient, GitLabError
-from scripts.gitlab.examples import sft_to_dpo
-from scripts.gitlab.link import DEFAULT_FIX_PATTERN, parse_user_time
-from scripts.gitlab.store import GitlabStore, parse_mr_ref
-from scripts.gitlab.sync import process_store, sync_store
+from scripts.ingest.gitlab.client import FixtureTransport, GitLabClient, GitLabError
+from scripts.ingest.gitlab.examples import sft_to_dpo
+from scripts.ingest.gitlab.link import DEFAULT_FIX_PATTERN, parse_user_time
+from scripts.ingest.gitlab.store import GitlabStore, parse_mr_ref
+from scripts.ingest.gitlab.sync import process_store, sync_store
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -175,8 +175,8 @@ def _propose(records: list[dict], args) -> None:
         print("No examples to propose rules from.")
         return
     from scripts.rules.llm import chat_complete, thinking_controls
-    from scripts.rules.propose import propose_rules
-    from scripts.rules.store import upsert_proposals
+    from scripts.proposals.propose import propose_rules
+    from scripts.proposals.store import upsert_proposals
 
     if args.mock_response:
         raw = Path(args.mock_response).read_text(encoding="utf-8")
@@ -263,7 +263,7 @@ def _cmd_sync(args) -> None:
 
 
 def _signals(args):
-    from scripts.gitlab.signals import load_signal_config
+    from scripts.ingest.gitlab.signals import load_signal_config
 
     pattern = args.mrr_pattern or args.fix_pattern
     return load_signal_config(getattr(args, "config", None), team_leads=args.team_lead, mrr_pattern=pattern)

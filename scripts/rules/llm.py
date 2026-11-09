@@ -1,11 +1,26 @@
-"""Chat completion against any OpenAI-compatible server, with JSON retry."""
+"""Rule extraction on top of the shared chat client.
+
+Chat completion itself lives in ``scripts.llm.client``. This module keeps the
+rule prompt, JSON retry, and the names older callers import.
+"""
 
 from __future__ import annotations
 
 import re
 
-from scripts.rules.parsing import ModelOutputError, extract_json
-from scripts.rules.merge import slug_category
+from scripts.llm.client import build_chat_kwargs, chat_complete, thinking_controls
+from scripts.llm.parsing import ModelOutputError, extract_json
+from scripts.proposals.merge import slug_category
+
+__all__ = [
+    "SYSTEM_PROMPT",
+    "build_chat_kwargs",
+    "chat_complete",
+    "coerce_rules",
+    "request_rules",
+    "session_ids_in_transcript",
+    "thinking_controls",
+]
 
 SYSTEM_PROMPT = """You extract durable rules that should be added to an AI coding agent's system prompt (AGENTS.md or the harness system prompt).
 
@@ -32,81 +47,6 @@ _RETRY_HINT = (
     '{"rules":[{"text":"...","category":"...","rationale":"...","session_ids":["..."],"evidence":"..."}]} '
     "with no markdown and no thinking."
 )
-
-
-def thinking_controls(disable_thinking: bool) -> tuple[str, dict]:
-    """Suffix and request body used to turn Qwen3 thinking off.
-
-    llama.cpp honors ``chat_template_kwargs.enable_thinking`` and Qwen3 also
-    treats a trailing ``/no_think`` as an instruction to skip the think block.
-    """
-    if not disable_thinking:
-        return "", {}
-    return "\n/no_think", {"chat_template_kwargs": {"enable_thinking": False}}
-
-
-def build_chat_kwargs(
-    model: str,
-    messages: list[dict],
-    *,
-    temperature: float,
-    max_tokens: int,
-    extra_body: dict | None = None,
-) -> dict:
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    if extra_body:
-        kwargs["extra_body"] = extra_body
-    return kwargs
-
-
-def _message_text(message) -> str:
-    content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
-    if isinstance(content, list):
-        parts: list[str] = []
-        for part in content:
-            if isinstance(part, str):
-                parts.append(part)
-            elif isinstance(part, dict):
-                parts.append(str(part.get("text") or ""))
-            else:
-                parts.append(str(getattr(part, "text", "") or ""))
-        return "\n".join(parts)
-    return content or ""
-
-
-def chat_complete(
-    endpoint,
-    messages: list[dict],
-    *,
-    temperature: float,
-    max_tokens: int,
-    timeout: float,
-    extra_body: dict | None = None,
-):
-    """Return the assistant text. ``endpoint`` is an Endpoint from endpoint.py."""
-    from openai import OpenAI
-
-    client = OpenAI(
-        base_url=endpoint.base_url,
-        api_key=endpoint.api_key or "local",
-        timeout=timeout,
-    )
-    kwargs = build_chat_kwargs(
-        endpoint.model,
-        messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        extra_body=extra_body,
-    )
-    response = client.chat.completions.create(**kwargs)
-    if not response.choices:
-        raise ModelOutputError("model returned no choices")
-    return _message_text(response.choices[0].message)
 
 
 def session_ids_in_transcript(text: str) -> list[str]:

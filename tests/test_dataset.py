@@ -4,13 +4,13 @@ import json
 from pathlib import Path
 
 from scripts.build_dataset import main as build_main
-from scripts.dataset.build import build_samples
-from scripts.dataset.tasks import from_gitlab_store
-from scripts.dataset.evaluate import review_metrics, style_metrics
-from scripts.dataset.format import clip_diff_context, render_chat, render_qwen3, sequence_tokens, split_messages
-from scripts.dataset.mix import is_held_out
-from scripts.gitlab.signals import SignalConfig
-from scripts.gitlab.store import GitlabStore
+from scripts.datasets.build import build_samples
+from scripts.datasets.tasks import from_gitlab_store
+from scripts.training.evaluate import review_metrics, style_metrics
+from scripts.datasets.format import clip_diff_context, render_chat, render_qwen3, sequence_tokens, split_messages
+from scripts.datasets.mix import is_held_out
+from scripts.ingest.gitlab.signals import SignalConfig
+from scripts.ingest.gitlab.store import GitlabStore
 
 DIFF = "@@ -1,3 +1,3 @@\n def helper():\n-old_name\n+parse_config\n"
 
@@ -380,9 +380,9 @@ def test_review_export_is_short_and_template_is_selectable(tmp_path: Path):
 
 
 def test_review_context_source_model_and_author_metrics():
-    from scripts.dataset.context import function_at, pack_sections, review_context
-    from scripts.dataset.evaluate import author_metrics, false_positive_rate
-    from scripts.rules.sessions import source_model_info
+    from scripts.datasets.context import function_at, pack_sections, review_context
+    from scripts.training.evaluate import author_metrics, false_positive_rate
+    from scripts.ingest.opencode_sessions import source_model_info
 
     info = source_model_info({"model": {"providerID": "anthropic", "modelID": "claude-sonnet"}})
     assert info["label"] == "anthropic/claude-sonnet"
@@ -419,7 +419,7 @@ def test_review_context_source_model_and_author_metrics():
         {"kind": "review-negative", "messages": [{"role": "user", "content": "diff"}, {"role": "assistant", "content": "No issues."}]}
     ]
     assert false_positive_rate(negatives, lambda _messages: "This leaks a secret.")["false_positive_rate"] == 1.0
-    from scripts.dataset.evaluate import compare_reviewers
+    from scripts.training.evaluate import compare_reviewers
 
     shared = [
         {
@@ -455,7 +455,7 @@ def test_review_context_source_model_and_author_metrics():
 
 
 def test_home_27b_profile_is_short_qlora_and_smoke_reports_both_gpus(tmp_path: Path):
-    from scripts.dataset.smoke import simulate_smoke
+    from scripts.training.smoke import simulate_smoke
     from scripts.smoke_train import main as smoke_main
 
     profile_path = Path(__file__).resolve().parents[1] / "configs" / "train" / "author-qlora-2x16gb.json"

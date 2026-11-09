@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.gitlab.link import DEFAULT_FIX_PATTERN  # noqa: E402
-from scripts.gitlab.store import GitlabStore  # noqa: E402
-from scripts.gitlab.sync import process_store  # noqa: E402
+from scripts.ingest.gitlab.link import DEFAULT_FIX_PATTERN  # noqa: E402
+from scripts.ingest.gitlab.store import GitlabStore  # noqa: E402
+from scripts.ingest.gitlab.sync import process_store  # noqa: E402
 from shared import esc as _esc  # noqa: E402
 from shared import widget_value as _widget_value  # noqa: E402
 
@@ -175,7 +175,7 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
             _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymize_urls)
     else:
         st.markdown("**Комментарии**")
-        from scripts.gitlab.link import flatten_notes
+        from scripts.ingest.gitlab.link import flatten_notes
 
         for note in flatten_notes(bundle["discussions"], None):
             author = (note.get("author") or {}).get("username") or ""
@@ -217,16 +217,16 @@ def _reviewer_matches(name: str, reviewer: str | None) -> bool:
 
 
 def _signal_config(team_leads: str, pattern: str):
-    from scripts.gitlab.signals import load_signal_config
+    from scripts.ingest.gitlab.signals import load_signal_config
 
     leads = [part.strip() for part in (team_leads or "").split(",") if part.strip()]
     return load_signal_config(team_leads=leads, mrr_pattern=pattern or DEFAULT_FIX_PATTERN)
 
 
 def _render_timeline(bundle: dict, config) -> None:
-    from scripts.gitlab.classify import classify_commits
-    from scripts.gitlab.link import parse_hunks
-    from scripts.gitlab.trace import iter_threads
+    from scripts.ingest.gitlab.classify import classify_commits
+    from scripts.ingest.gitlab.link import parse_hunks
+    from scripts.ingest.gitlab.trace import iter_threads
 
     roles = {row["sha"]: row for row in classify_commits(bundle["commits"], bundle["mr"], bundle["discussions"], config)}
     events = []
@@ -320,7 +320,7 @@ def _render_stats(stats: dict, title: str) -> None:
 
 
 def _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymize_urls) -> None:
-    from scripts.gitlab.link import parse_hunks
+    from scripts.ingest.gitlab.link import parse_hunks
 
     anchor = trace.get("anchor") or {}
     note_id = str(trace.get("note_id"))

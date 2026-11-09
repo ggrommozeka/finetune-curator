@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-from scripts.dataset.evaluate import (
+from scripts.training.evaluate import (
     author_metrics,
     compare_reviewers,
     false_positive_rate,
@@ -16,7 +16,7 @@ from scripts.dataset.evaluate import (
     review_metrics,
     style_metrics,
 )
-from scripts.rules.endpoint import resolve_endpoint
+from scripts.llm.endpoint import resolve_endpoint
 from scripts.rules.llm import chat_complete, thinking_controls
 
 
@@ -28,7 +28,7 @@ def _complete_for(spec: dict):
             return canned
 
         return complete
-    from scripts.rules.endpoint import Endpoint
+    from scripts.llm.endpoint import Endpoint
 
     endpoint = Endpoint(
         base_url=spec["base_url"],

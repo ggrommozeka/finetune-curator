@@ -510,24 +510,33 @@ finetune-curator/
 ├── requirements.txt
 ├── .gitignore
 ├── scripts/
-│   ├── export_opencode.py    # LogMiner wrapper
-│   ├── export_approved.py    # Keep-only JSONL export
-│   ├── propose_rules.py      # LLM rule proposals
-│   ├── export_rules.py       # Approved rules → Markdown + JSON
-│   ├── export_gitlab_mrr.py  # GitLab sync / process / export
-│   ├── mine_patterns.py      # import, annotate, cluster, export, rollback
-│   ├── rules/                # selection, merge, endpoint, export
-│   ├── gitlab/               # client, store, sync, linking, anonymize
-│   └── patterns/             # multi-machine import, clusters, skills
+│   ├── export_opencode.py       # LogMiner wrapper
+│   ├── export_approved.py       # Keep-only JSONL export
+│   ├── propose_rules.py         # per-session proposals
+│   ├── export_rules.py          # approved rules and skills
+│   ├── export_gitlab_mrr.py     # GitLab sync / process / export
+│   ├── mine_patterns.py         # annotate, cluster, recommend
+│   ├── build_dataset.py         # author and reviewer datasets
+│   ├── eval_dataset.py          # held-out metrics
+│   ├── smoke_train.py           # local VRAM fit check
+│   ├── llm/                     # shared chat client, endpoint, JSON parsing
+│   ├── ingest/opencode_sessions.py
+│   ├── ingest/catalog.py        # one item model for sessions and MRs
+│   ├── ingest/gitlab/           # client, store, sync, linking, anonymize
+│   ├── analysis/                # clusters, recommendations, monitoring
+│   ├── proposals/               # one proposal file, approval, export
+│   ├── datasets/                # tasks, templates, mixing, context packing
+│   └── training/                # targets, eval, smoke test
 ├── viewer/
-│   ├── app.py                # one Streamlit app: sessions, GitLab, proposals, export
-│   ├── rules_page.py
-│   ├── gitlab_page.py        # stored MRs, offline process, example review
-│   ├── gitlab_panel.py       # before/after review card
-│   └── patterns_page.py      # cluster review: rule vs skill
+│   ├── app.py                   # streamlit run viewer/app.py
+│   ├── shared.py                # navigation, paths, widgets
+│   └── pages/                   # sessions, gitlab, proposals, export, monitoring
+├── configs/train/               # bf16 and at-home QLoRA profiles
 ├── tests/
-└── data/                     # local only (gitignored)
+└── data/                        # local only (gitignored)
 ```
+
+`scripts/rules/llm.py` still exposes `request_rules`, `chat_complete`, and `thinking_controls`. New code should call the chat helpers from `scripts.llm` and keep rule prompts in `scripts.proposals`.
 
 ## Tests
 
@@ -535,7 +544,7 @@ finetune-curator/
 python -m pytest
 ```
 
-The suite covers merge, JSON parsing (thinking tags included), chunking and batching, decision files, both export formats, OpenCode config resolution, a mocked end-to-end `propose_rules` → `export_rules` run, and the GitLab exporter against a recorded API fixture. It does not call a live model or a live GitLab.
+The suite covers merge, JSON parsing (thinking tags included), chunking and batching, decision files, both export formats, OpenCode config resolution, a mocked end-to-end `propose_rules` → `export_rules` run, the GitLab exporter against a recorded API fixture, pattern mining, and the dataset builder (including the simulated at-home smoke test). It does not call a live model or a live GitLab.
 
 ## Notes
 
