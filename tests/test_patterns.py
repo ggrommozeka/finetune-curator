@@ -136,7 +136,9 @@ def test_import_dedupes_incremental_and_sqlite_schemas(tmp_path: Path):
     gitlab.close()
     ingested = import_gitlab_traces(store, tmp_path / "gitlab")
     assert ingested["added"] == 2
-    assert any(row["sources"] == ["gitlab"] for row in store.sessions())
+    rows = store.sessions()
+    assert any(row["sources"] == ["gitlab"] for row in rows)
+    assert any(row.get("reviewer") == "lead" for row in rows)
     store.close()
 
 

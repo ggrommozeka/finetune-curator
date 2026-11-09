@@ -272,6 +272,7 @@ def import_gitlab_traces(store: PatternStore, gitlab_root: Path) -> dict:
                     {"role": "assistant", "content": trace.get("after") or ""},
                 ],
                 "source_kind": "gitlab_review",
+                "reviewer": trace.get("reviewer") or trace.get("author_username") or "",
             }
         )
     return ingest_records(store, records, source_label="gitlab", kind="gitlab", schema_version="gitlab-traces")

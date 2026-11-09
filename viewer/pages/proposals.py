@@ -171,8 +171,19 @@ def _render_clusters() -> None:
         clusters = store.clusters()
         if not clusters:
             return
+        reviewer_filter = st.text_input("Ревьюер GitLab", key="pat_reviewer", **widget_value("pat_reviewer", ""))
+        sessions = {row["global_id"]: row for row in store.sessions()}
+        if reviewer_filter:
+            clusters = [
+                cluster
+                for cluster in clusters
+                if any(
+                    reviewer_filter.lower() in str(sessions.get(gid, {}).get("reviewer") or "").lower()
+                    for gid in cluster.get("session_ids") or []
+                )
+            ]
         st.markdown("### Кластеры")
-        st.caption("Те же предложения, что в списке выше. Здесь частота, машины и сессии.")
+        st.caption("Те же предложения, что в списке выше. Фильтр ревьюера скрывает чужие комментарии, не удаляет их.")
         for cluster in clusters[:30]:
             st.markdown(
                 f"**{esc(cluster.get('label') or cluster['id'])}** · n={cluster.get('frequency')} · "
@@ -180,9 +191,13 @@ def _render_clusters() -> None:
                 f"{', '.join(cluster.get('machine_names') or [])}"
             )
             for gid in (cluster.get("session_ids") or [])[:8]:
+                session = sessions.get(gid) or {}
+                if reviewer_filter and reviewer_filter.lower() not in str(session.get("reviewer") or "").lower():
+                    continue
                 annotation = store.annotation(gid) or {}
+                who = f" · {session.get('reviewer')}" if session.get("reviewer") else ""
                 st.caption(
-                    f"{gid} · {annotation.get('outcome') or ''} · {annotation.get('error_type') or ''} · "
+                    f"{gid}{who} · {annotation.get('outcome') or ''} · {annotation.get('error_type') or ''} · "
                     f"{annotation.get('user_correction') or annotation.get('what_worked') or ''}"
                 )
                 if st.button(f"Открыть {gid}", key=f"cluster_open_{cluster['id']}_{gid}"):
