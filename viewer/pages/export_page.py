@@ -75,8 +75,8 @@ def render() -> None:
             st.success(f"{gitlab_sft} · {gitlab_dpo}")
     st.markdown("#### Датасеты для обучения")
     st.caption(
-        "all — смесь для большой модели (32k). agentic и style — те же задачи отдельно. "
-        "review — отдельный датасет для модели ~9B: короче, дифф только вокруг комментария."
+        "agentic и style — Qwen3 27B, шаблон qwen3, до 32k токенов. "
+        "review — отдельный датасет для модели ~9B."
     )
     dataset_task = st.selectbox("Задача", ["all", "agentic", "style", "review"], key="finetune_task")
     chat_template = st.selectbox("Chat template", ["qwen3", "chatml", "llama3", "gemma"], key="finetune_template")
@@ -103,6 +103,7 @@ def render() -> None:
         review = st.slider("Доля review", 0.0, 1.0, 0.25, 0.05)
     eval_ratio = st.slider("Held-out", 0.0, 0.5, 0.1, 0.05)
     anonymize = st.checkbox("Анонимизировать датасет", value=False)
+    keep_thinking = st.checkbox("Оставить блоки <think>", value=False)
     if st.button("Собрать датасет"):
         argv = [
             "--input",
@@ -130,6 +131,7 @@ def render() -> None:
             argv.extend(["--agentic", str(agentic), "--style", str(style), "--review", str(review)])
         if anonymize:
             argv.append("--anonymize")
+        argv.extend(["--thinking", "keep" if keep_thinking else "strip"])
         try:
             build_finetune(argv)
         except SystemExit as exc:

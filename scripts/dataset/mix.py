@@ -9,6 +9,7 @@ from collections import defaultdict
 from scripts.dataset.format import sequence_tokens, split_messages
 from scripts.dataset.tasks import Sample
 from scripts.gitlab.anonymize import Anonymizer
+from scripts.rules.parsing import strip_thinking
 
 
 def content_key(sample: Sample) -> str:
@@ -53,6 +54,34 @@ def fit_length(samples: list[Sample], max_tokens: int, chars_per_token: float) -
             )
             fitted.append(piece)
     return fitted
+
+
+def _rewrite_content(message: dict, fn) -> None:
+    if isinstance(message.get("content"), str):
+        message["content"] = fn(message["content"])
+
+
+def apply_thinking(samples: list[Sample], mode: str) -> list[Sample]:
+    """Strip or keep Qwen3 ``<think>`` blocks in every message, including DPO pairs.
+
+    ``strip`` matches inference with thinking disabled. ``keep`` leaves the blocks
+    so training and a thinking-enabled llama-server agree.
+    """
+    if mode not in {"strip", "keep"}:
+        raise ValueError(mode)
+    if mode == "keep":
+        return samples
+    for sample in samples:
+        for message in sample.messages:
+            _rewrite_content(message, strip_thinking)
+        if not sample.dpo:
+            continue
+        for key in ("prompt", "chosen", "rejected"):
+            for message in sample.dpo.get(key) or []:
+                _rewrite_content(message, strip_thinking)
+        if sample.gold:
+            sample.gold = strip_thinking(sample.gold)
+    return samples
 
 
 def anonymize_samples(samples: list[Sample], *, strip_urls: bool) -> list[Sample]:

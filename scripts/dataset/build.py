@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from scripts.dataset.format import CHAT_TEMPLATES, render_chat
-from scripts.dataset.mix import anonymize_samples, assign_splits, dedup, fit_length, manifest_block, mix_ratios
+from scripts.dataset.mix import anonymize_samples, apply_thinking, assign_splits, dedup, fit_length, manifest_block, mix_ratios
 from scripts.dataset.tasks import from_gitlab_store, from_opencode, load_machine_labels
 from scripts.gitlab.signals import SignalConfig, load_signal_config
 
@@ -34,6 +34,7 @@ def build_samples(
     tasks: set[str] | None = None,
     chat_template: str = "qwen3",
     review_context_lines: int | None = None,
+    thinking: str = "strip",
 ) -> dict:
     if chat_template not in CHAT_TEMPLATES:
         raise ValueError(f"Unknown chat template {chat_template!r}")
@@ -57,6 +58,7 @@ def build_samples(
     if tasks:
         samples = [sample for sample in samples if sample.task in tasks]
     samples = dedup(samples)
+    samples = apply_thinking(samples, thinking)
     samples = fit_length(samples, max_tokens, chars_per_token)
     if anonymize or anonymize_urls:
         samples = anonymize_samples(samples, strip_urls=anonymize_urls or anonymize)
@@ -68,6 +70,9 @@ def build_samples(
         "eval": held,
         "manifest": {
             "chat_template": chat_template,
+            "tool_format": "qwen3" if chat_template == "qwen3" else chat_template,
+            "thinking": thinking,
+            "target_model": "qwen3-9b" if tasks == {"review"} else "qwen3-27b",
             "tasks": sorted(tasks) if tasks else ["agentic", "style", "review"],
             "max_tokens": max_tokens,
             "review_context_lines": review_context_lines,

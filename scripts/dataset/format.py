@@ -184,23 +184,32 @@ def shrink_messages(messages: list[dict], max_tokens: int, chars_per_token: floa
 
 
 def split_messages(messages: list[dict], max_tokens: int, chars_per_token: float) -> list[list[dict]]:
-    """Split a long conversation on turn boundaries. Each piece stays under the budget."""
+    """Split a long conversation on turn boundaries. Each piece stays under the budget.
+
+    Later pieces repeat the system prompt and the first user turn, so a chunk
+    still knows the task after the earlier tool calls have been cut off.
+    """
     if not messages:
         return []
     system = [message for message in messages if message.get("role") == "system"][:1]
     body = [message for message in messages if message.get("role") != "system"]
     if sequence_tokens(system + body, chars_per_token) <= max_tokens:
         return [system + body]
+    first_user = next((message for message in body if message.get("role") == "user"), None)
+    head = system + ([first_user] if first_user else [])
+    rest = body[1:] if first_user and body and body[0] is first_user else body
+    if first_user and body and body[0] is not first_user:
+        rest = [message for message in body if message is not first_user]
     chunks: list[list[dict]] = []
-    current: list[dict] = list(system)
-    for message in body:
+    current: list[dict] = list(head)
+    for message in rest:
         trial = current + [message]
         if sequence_tokens(trial, chars_per_token) <= max_tokens:
             current = trial
             continue
-        if len(current) > len(system):
+        if len(current) > len(head) or not rest:
             chunks.append(shrink_messages(current, max_tokens, chars_per_token))
-        current = shrink_messages(system + [message], max_tokens, chars_per_token)
-    if len(current) > len(system):
+        current = shrink_messages(head + [message], max_tokens, chars_per_token)
+    if current:
         chunks.append(shrink_messages(current, max_tokens, chars_per_token))
-    return [chunk for chunk in chunks if chunk] or [shrink_messages(system + body, max_tokens, chars_per_token)]
+    return [chunk for chunk in chunks if chunk] or [shrink_messages(head or system + body, max_tokens, chars_per_token)]

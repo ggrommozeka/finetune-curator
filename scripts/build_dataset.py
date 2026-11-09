@@ -20,7 +20,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patterns-store", default="data/patterns", help="Optional machine labels")
     parser.add_argument("--output-dir", default="data/finetune")
     parser.add_argument("--task", choices=["all", "agentic", "style", "review"], default="all")
-    parser.add_argument("--chat-template", choices=list(CHAT_TEMPLATES), default="qwen3")
+    parser.add_argument(
+        "--chat-template",
+        choices=list(CHAT_TEMPLATES),
+        default="qwen3",
+        help="Agentic and style default to Qwen3 tool-calling ChatML. Review can select another 9B family.",
+    )
+    parser.add_argument(
+        "--thinking",
+        choices=["strip", "keep"],
+        default="strip",
+        help="Drop or keep <think> blocks. strip matches llama-server with thinking disabled.",
+    )
     parser.add_argument("--agentic", type=float, default=0.5)
     parser.add_argument("--style", type=float, default=0.25)
     parser.add_argument("--review", type=float, default=0.25)
@@ -79,6 +90,7 @@ def main(argv: list[str] | None = None) -> None:
         tasks=tasks,
         chat_template=args.chat_template,
         review_context_lines=args.review_context_lines if args.task == "review" else None,
+        thinking=args.thinking,
     )
     written = write_dataset(result, Path(args.output_dir))
     print(json.dumps({"manifest": result["manifest"], "files": written}, ensure_ascii=False, indent=2))

@@ -7,7 +7,7 @@ from scripts.build_dataset import main as build_main
 from scripts.dataset.build import build_samples
 from scripts.dataset.tasks import from_gitlab_store
 from scripts.dataset.evaluate import review_metrics, style_metrics
-from scripts.dataset.format import clip_diff_context, render_chat, render_qwen3, sequence_tokens
+from scripts.dataset.format import clip_diff_context, render_chat, render_qwen3, sequence_tokens, split_messages
 from scripts.dataset.mix import is_held_out
 from scripts.gitlab.signals import SignalConfig
 from scripts.gitlab.store import GitlabStore
@@ -242,7 +242,6 @@ def test_length_limit_dedup_anonymize_and_manifest(tmp_path: Path):
     assert result["train"]
     for sample in result["train"]:
         assert sequence_tokens(sample.messages, 3.0) <= 80
-    assert len(result["train"]) >= 2
     emailed = tmp_path / "mail.jsonl"
     _write_jsonl(
         emailed,
@@ -378,3 +377,55 @@ def test_review_export_is_short_and_template_is_selectable(tmp_path: Path):
     assert dpo
     rendered = render_chat([{"role": "user", "content": "hi"}], "gemma")
     assert rendered.startswith("<start_of_turn>user\n")
+
+
+def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Path):
+    path = tmp_path / "sessions.jsonl"
+    _write_jsonl(
+        path,
+        [
+            _session(
+                "think",
+                [
+                    {"role": "user", "content": "rename it"},
+                    {"role": "assistant", "content": "<think>plan the edit</think>\nRenamed the helper."},
+                ],
+            )
+        ],
+    )
+    decisions = tmp_path / "decisions.json"
+    decisions.write_text(json.dumps({"labels": {"think": "keep"}}), encoding="utf-8")
+    stripped = build_samples(
+        opencode_path=path,
+        decisions_path=decisions,
+        ratios={"agentic": 1, "style": 0, "review": 0},
+        eval_ratio=0,
+        thinking="strip",
+    )
+    blob = json.dumps(stripped["train"][0].as_sft())
+    assert "<think>" not in blob
+    assert "Renamed the helper." in blob
+    assert stripped["manifest"]["thinking"] == "strip"
+    assert stripped["manifest"]["target_model"] == "qwen3-27b"
+    assert stripped["manifest"]["tool_format"] == "qwen3"
+    kept = build_samples(
+        opencode_path=path,
+        decisions_path=decisions,
+        ratios={"agentic": 1, "style": 0, "review": 0},
+        eval_ratio=0,
+        thinking="keep",
+    )
+    assert "<think>" in json.dumps(kept["train"][0].as_sft())
+    parts = split_messages(
+        [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "TASK-START"},
+            {"role": "assistant", "content": "a" * 400},
+            {"role": "tool", "content": "b" * 400},
+            {"role": "assistant", "content": "c" * 400},
+        ],
+        80,
+        3.0,
+    )
+    assert len(parts) >= 2
+    assert all("TASK-START" in json.dumps(part) for part in parts)

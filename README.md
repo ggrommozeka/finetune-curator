@@ -320,9 +320,11 @@ Export records the file versions and the adoption time. The report compares sess
 - **Style.** Team-lead commits (MRR titles and the lead's other commits) and comment-then-fix pairs become "rewrite this code following project conventions" samples. The code before the edit is the DPO `rejected` completion; the code after is `chosen`.
 - **Review.** A diff hunk is the input and the review comment, from every reviewer, is the output, with a suggested fix when the comment was linked to one. Hunks nobody commented on are negatives whose target is `No issues.`
 
-`--agentic`, `--style`, and `--review` are mixing weights for `--task all`. Held-out rows are chosen by session id or MR id, so one session or MR never appears in both `train.jsonl` and `eval.jsonl`. Long conversations are split on turn boundaries under `--max-tokens` (default 32000 for the large model). `--anonymize` strips emails and URLs. `manifest.json` counts rows by task, source, and machine and records the chat template name.
+Agentic and style target the Qwen3-family 27B served with llama.cpp (about 200k tokens of context at inference). Their export defaults to the Qwen3 chat template and OpenAI-style tool calls (`tool_calls` on the assistant turn, `tool` role for the result). `<think>` blocks are stripped by default so the file matches a server started with thinking off. `--thinking keep` leaves the blocks in place; use that only if inference also leaves thinking on. Training length is `--max-tokens` (default 32000). A session longer than that is cut on turn boundaries, and each piece repeats the system prompt and the first user message.
 
-Each task is also its own dataset. Agentic and style keep the 32k budget for the larger model. Review is the set for a separate ~9B review model: `--task review` writes only review SFT and DPO, plus the held-out eval, and defaults to 8192 tokens (raise it toward 16384 if that 9B was trained with a longer context). Diffs keep `--review-context-lines` (default 20) on each side of the comment instead of the whole hunk. `--chat-template` is `qwen3` by default and can be `chatml`, `llama3`, or `gemma`. The messages stay in the OpenAI tool-calling schema; the template name is what Unsloth should apply.
+`--agentic`, `--style`, and `--review` are mixing weights for `--task all`. Held-out rows are chosen by session id or MR id, so one session or MR never appears in both `train.jsonl` and `eval.jsonl`. `--anonymize` strips emails and URLs. `manifest.json` counts rows by task, source, and machine and records `chat_template`, `thinking`, and `target_model`.
+
+Each task is also its own dataset. `--task agentic` and `--task style` stay on the 27B defaults above. Review is the set for a separate ~9B review model: `--task review` writes only review SFT and DPO, plus the held-out eval, and defaults to 8192 tokens (raise it toward 16384 if that 9B was trained with a longer context). Diffs keep `--review-context-lines` (default 20) on each side of the comment instead of the whole hunk. `--chat-template` can be `chatml`, `llama3`, or `gemma` for that smaller model. The messages stay in the OpenAI tool-calling schema; the template name is what Unsloth should apply.
 
 ```bash
 python -m scripts.build_dataset \
@@ -337,15 +339,19 @@ python -m scripts.build_dataset \
 
 python -m scripts.eval_dataset --eval data/finetune/eval.jsonl --mock-response "No issues."
 
-python -m scripts.build_dataset --task agentic --output-dir data/finetune/agentic --max-tokens 32000
-python -m scripts.build_dataset --task style --output-dir data/finetune/style --max-tokens 32000
+python -m scripts.build_dataset --task agentic --output-dir data/finetune/agentic \
+  --chat-template qwen3 --thinking strip --max-tokens 32000
+python -m scripts.build_dataset --task style --output-dir data/finetune/style \
+  --chat-template qwen3 --thinking strip --max-tokens 32000
 python -m scripts.build_dataset --task review --output-dir data/finetune/review \
   --chat-template qwen3 --max-tokens 8192 --review-context-lines 20
 ```
 
-The same button is on the **Экспорт** page of `streamlit run viewer/app.py`.
+The same controls are on the **Экспорт** page of `streamlit run viewer/app.py`.
 
-Train a Qwen3 LoRA with Unsloth. The tokenizer's `qwen3` template matches the JSONL:
+### QLoRA for the 27B
+
+Train agentic and style on the Qwen3 27B with Unsloth in 4-bit. The sequence length here is the training budget (32768), not the 200k context used later in llama.cpp. Point `from_pretrained` at the Unsloth 4-bit build of the same Qwen3 the GGUF was converted from.
 
 ```python
 from datasets import load_dataset
@@ -354,7 +360,7 @@ from unsloth import FastLanguageModel
 from unsloth.chat_templates import get_chat_template
 
 model, tokenizer = FastLanguageModel.from_pretrained(
-    "unsloth/Qwen3-8B",
+    "unsloth/Qwen3-27B",
     max_seq_length=32768,
     load_in_4bit=True,
 )
@@ -363,9 +369,12 @@ model = FastLanguageModel.get_peft_model(
     model,
     r=16,
     lora_alpha=16,
+    lora_dropout=0,
+    bias="none",
+    use_gradient_checkpointing="unsloth",
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
 )
-dataset = load_dataset("json", data_files={"train": "data/finetune/train.jsonl"})
+dataset = load_dataset("json", data_files={"train": "data/finetune/agentic/train.jsonl"})
 
 def formatting(batch):
     texts = [
@@ -382,22 +391,43 @@ trainer = SFTTrainer(
         dataset_text_field="text",
         max_length=32768,
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=8,
         num_train_epochs=1,
-        output_dir="outputs/qwen3-lora",
+        learning_rate=2e-4,
+        output_dir="outputs/qwen3-27b-lora",
     ),
 )
 trainer.train()
-model.save_pretrained_gguf("outputs/gguf", tokenizer, quantization_method="q5_k_m")
 ```
 
-DPO uses `train_dpo.jsonl` (`prompt`, `chosen`, and `rejected` are message lists) with TRL's `DPOTrainer` and the same Qwen3 template.
+DPO uses `train_dpo.jsonl` (`prompt`, `chosen`, and `rejected` are message lists) with TRL's `DPOTrainer` and the same template. If the export was built with `--thinking keep`, do not disable thinking at serve time.
 
-Serve the GGUF with llama.cpp. `--jinja` turns on the chat template stored in the file:
+Two ways to serve the result with llama.cpp:
+
+Merged GGUF, produced by Unsloth in the same quant family as the Q5_K_XL already in use:
+
+```python
+model.save_pretrained_gguf("outputs/qwen3-27b-gguf", tokenizer, quantization_method="q5_k_m")
+```
 
 ```bash
-llama-server -m outputs/gguf/model.gguf --jinja -c 32768 --host 127.0.0.1 --port 8080
+llama-server -m outputs/qwen3-27b-gguf/model.gguf --jinja -c 200000 --host 127.0.0.1 --port 8080
 ```
+
+Or keep that base GGUF and attach the adapter. Save the LoRA, convert it with llama.cpp's `convert_lora_to_gguf.py`, and load it beside the base model:
+
+```python
+model.save_pretrained("outputs/qwen3-27b-lora")
+tokenizer.save_pretrained("outputs/qwen3-27b-lora")
+```
+
+```bash
+python convert_lora_to_gguf.py outputs/qwen3-27b-lora --outfile adapter.gguf
+llama-server -m qwen3-27b-q5_k_xl.gguf --lora adapter.gguf --jinja -c 200000 \
+  --host 127.0.0.1 --port 8080
+```
+
+`--jinja` applies the Qwen3 chat template stored in the GGUF, including tool calls. A dataset built with `--thinking strip` should be served with thinking disabled (`chat_template_kwargs.enable_thinking` false, or the server's equivalent). A dataset built with `--thinking keep` should leave thinking on.
 
 Score the held-out file against a live server with `python -m scripts.eval_dataset --eval data/finetune/eval.jsonl`. Add `--judge` to let that server decide whether a predicted review matches the real comment. Without `--judge`, review matches are lexical and style similarity is a text ratio.
 
