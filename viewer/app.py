@@ -5,10 +5,22 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
+import sys
 from pathlib import Path
 
 import streamlit as st
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.rules.sessions import (  # noqa: E402
+    first_user_preview,
+    load_jsonl,
+    load_review_decisions as load_decisions,
+    normalize_messages,
+    session_id,
+)
 
 DEFAULT_INPUT = "data/raw_scored.jsonl"
 DEFAULT_DECISIONS = "data/decisions.json"
@@ -124,6 +136,9 @@ st.markdown(
   .pill-keep { background: #12301c; color: #6fdf9a; border: 1px solid #2a6a40; }
   .pill-discard { background: #301418; color: #f09090; border: 1px solid #6a2830; }
   .pill-undecided { background: #1a1e28; color: #a0aec0; border: 1px solid #303848; }
+  .pill-approved { background: #12301c; color: #6fdf9a; border: 1px solid #2a6a40; }
+  .pill-rejected { background: #301418; color: #f09090; border: 1px solid #6a2830; }
+  .pill-pending { background: #1a1e28; color: #a0aec0; border: 1px solid #303848; }
   .pill-score { background: #142038; color: #90b8f0; border: 1px solid #284868; }
 
   .action-bar {
@@ -149,77 +164,15 @@ def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--input", default=DEFAULT_INPUT)
     parser.add_argument("--decisions", default=DEFAULT_DECISIONS)
+    parser.add_argument("--rules", default="data/rule_proposals.json")
+    parser.add_argument("--rule-decisions", default="data/rule_decisions.json")
     args, _ = parser.parse_known_args()
     return args
-
-
-def load_jsonl(path: Path) -> list[dict]:
-    rows: list[dict] = []
-    if not path.exists():
-        return rows
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    return rows
-
-
-def load_decisions(path: Path) -> dict:
-    if not path.exists():
-        return {"labels": {}, "notes": {}}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {"labels": {}, "notes": {}}
-    if data and all(isinstance(v, str) for v in data.values()):
-        return {"labels": {str(k): v.lower() for k, v in data.items()}, "notes": {}}
-    labels = {str(k): str(v).lower() for k, v in (data.get("labels") or {}).items()}
-    notes = {str(k): str(v) for k, v in (data.get("notes") or {}).items()}
-    return {"labels": labels, "notes": notes}
 
 
 def save_decisions(path: Path, decisions: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(decisions, ensure_ascii=False, indent=2), encoding="utf-8")
-
-
-def session_id(rec: dict) -> str:
-    return str(
-        rec.get("id")
-        or rec.get("session_id")
-        or f"idx-{abs(hash(json.dumps(rec, sort_keys=True, default=str))) % 10**8}"
-    )
-
-
-def normalize_messages(rec: dict) -> list[dict]:
-    msgs = rec.get("messages") or []
-    if not msgs:
-        return []
-    if isinstance(msgs[0], str):
-        out = []
-        for m in msgs:
-            try:
-                out.append(json.loads(m))
-            except json.JSONDecodeError:
-                out.append({"role": "unknown", "content": m})
-        return out
-    return msgs
-
-
-def first_user_preview(msgs: list[dict], n: int = 90) -> str:
-    for m in msgs:
-        if m.get("role") == "user":
-            c = m.get("content") or ""
-            if not isinstance(c, str):
-                c = json.dumps(c, ensure_ascii=False)
-            c = re.sub(r"\s+", " ", c).strip()
-            return (c[:n] + "…") if len(c) > n else c
-    return "—"
 
 
 def content_to_str(content) -> str:
@@ -248,10 +201,10 @@ def status_pill(status: str) -> str:
 
 def _esc(s: str) -> str:
     return (
-        s.replace("&", "&")
-        .replace("<", "<")
-        .replace(">", ">")
-        .replace('"', """)
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
     )
 
 
@@ -301,14 +254,44 @@ def render_message(i: int, m: dict) -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
+def _widget_value(key: str, default):
+    """Pass Streamlit's value only before the widget has state."""
+    if key in st.session_state:
+        return {}
+    return {"value": default}
+
+
+def _queue_session_pos(index: int) -> None:
+    """Move the session cursor. The slider key is updated before the widget is built."""
+    st.session_state.idx = index
+    st.session_state.pending_session_pos = index + 1
+
+
 def main() -> None:
     cli = parse_cli_args()
+    if st.session_state.get("pending_page"):
+        st.session_state.page = st.session_state.pop("pending_page")
 
     with st.sidebar:
         st.markdown("### ◈ finetune-curator")
         st.caption("Разметка траекторий для SFT / Unsloth")
-        input_path = st.text_input("JSONL", cli.input)
-        decisions_path = st.text_input("Decisions", cli.decisions)
+        page = st.radio("Раздел", ["Сессии", "Правила"], key="page")
+
+    if page == "Правила":
+        from rules_page import render_rules_page
+
+        render_rules_page(cli)
+        return
+
+    _render_sessions(cli)
+
+
+def _render_sessions(cli) -> None:
+    with st.sidebar:
+        input_path = st.text_input("JSONL", key="input_path", **_widget_value("input_path", cli.input))
+        decisions_path = st.text_input(
+            "Decisions", key="decisions_path", **_widget_value("decisions_path", cli.decisions)
+        )
         reload = st.button("↻ Reload", use_container_width=True)
 
     input_p = Path(input_path)
@@ -317,7 +300,7 @@ def main() -> None:
     if "rows" not in st.session_state or reload:
         st.session_state.rows = load_jsonl(input_p)
         st.session_state.decisions = load_decisions(decisions_p)
-        st.session_state.idx = 0
+        _queue_session_pos(0)
 
     rows: list[dict] = st.session_state.rows
     decisions: dict = st.session_state.decisions
@@ -344,16 +327,45 @@ def main() -> None:
     with st.sidebar:
         st.markdown("---")
         st.markdown("**Фильтры**")
-        min_score = st.slider("Min score", 0.0, 1.0, 0.0, 0.05)
+        jump = st.session_state.get("jump_sid")
+        if jump:
+            st.session_state.min_score = 0.0
+            st.session_state.status_filter = ["undecided", "keep", "discard"]
+            st.session_state.only_tools = False
+            st.session_state.query = ""
+            st.session_state.label_filter = sorted({str(r.get("label", "unknown")) for r in rows})
+        min_score = st.slider(
+            "Min score",
+            min_value=0.0,
+            max_value=1.0,
+            step=0.05,
+            key="min_score",
+            **_widget_value("min_score", 0.0),
+        )
         all_labels = sorted({str(r.get("label", "unknown")) for r in rows})
-        label_filter = st.multiselect("Label", all_labels, default=all_labels)
+        label_kwargs = {} if "label_filter" in st.session_state else {"default": all_labels}
+        label_filter = st.multiselect("Label", all_labels, key="label_filter", **label_kwargs)
+        status_kwargs = (
+            {}
+            if "status_filter" in st.session_state
+            else {"default": ["undecided", "keep", "discard"]}
+        )
         status_filter = st.multiselect(
             "Статус",
             ["undecided", "keep", "discard"],
-            default=["undecided", "keep", "discard"],
+            key="status_filter",
+            **status_kwargs,
         )
-        only_tools = st.checkbox("Только с tool calls", value=False)
-        query = st.text_input("Поиск в user-тексте", "")
+        only_tools = st.checkbox(
+            "Только с tool calls",
+            key="only_tools",
+            **_widget_value("only_tools", False),
+        )
+        query = st.text_input(
+            "Поиск в user-тексте",
+            key="query",
+            **_widget_value("query", ""),
+        )
 
         def status_of(rec: dict) -> str:
             return labels.get(session_id(rec), "undecided")
@@ -404,8 +416,21 @@ python -m scripts.export_approved \\
         )
 
     if not filtered:
+        missing = st.session_state.pop("jump_sid", None)
+        if missing:
+            st.warning(f"Сессия {missing} не найдена в текущем JSONL.")
         st.info("Нет сессий под текущие фильтры.")
         st.stop()
+
+    jump = st.session_state.get("jump_sid")
+    if jump:
+        for position, candidate in enumerate(filtered):
+            if session_id(candidate) == jump:
+                _queue_session_pos(position)
+                break
+        else:
+            st.warning(f"Сессия {jump} не попала в фильтр.")
+        st.session_state.jump_sid = None
 
     idx = int(st.session_state.get("idx", 0))
     idx = max(0, min(idx, len(filtered) - 1))
@@ -449,18 +474,30 @@ python -m scripts.export_approved \\
         st.caption("reasons: " + " · ".join(str(x) for x in reasons))
 
     n1, n2, n3 = st.columns([1, 2, 1])
+    if "pending_session_pos" in st.session_state:
+        st.session_state.session_pos = int(st.session_state.pop("pending_session_pos"))
+    if "session_pos" in st.session_state:
+        st.session_state.session_pos = max(1, min(int(st.session_state.session_pos), len(filtered)))
+
     with n1:
         if st.button("← Prev", use_container_width=True) and idx > 0:
-            st.session_state.idx = idx - 1
+            _queue_session_pos(idx - 1)
             st.rerun()
     with n2:
-        jump = st.slider("Сессия в фильтре", 1, len(filtered), idx + 1, label_visibility="collapsed")
-        if jump - 1 != idx:
-            st.session_state.idx = jump - 1
+        pos = st.slider(
+            "Сессия в фильтре",
+            min_value=1,
+            max_value=len(filtered),
+            key="session_pos",
+            label_visibility="collapsed",
+            **_widget_value("session_pos", idx + 1),
+        )
+        if pos - 1 != idx:
+            st.session_state.idx = pos - 1
             st.rerun()
     with n3:
         if st.button("Next →", use_container_width=True) and idx < len(filtered) - 1:
-            st.session_state.idx = idx + 1
+            _queue_session_pos(idx + 1)
             st.rerun()
 
     st.markdown("#### Диалог")
@@ -487,7 +524,7 @@ python -m scripts.export_approved \\
             st.session_state.decisions = decisions
             save_decisions(decisions_p, decisions)
             if idx < len(filtered) - 1:
-                st.session_state.idx = idx + 1
+                _queue_session_pos(idx + 1)
             st.rerun()
     with a2:
         if st.button("❌ Discard", use_container_width=True):
@@ -496,7 +533,7 @@ python -m scripts.export_approved \\
             st.session_state.decisions = decisions
             save_decisions(decisions_p, decisions)
             if idx < len(filtered) - 1:
-                st.session_state.idx = idx + 1
+                _queue_session_pos(idx + 1)
             st.rerun()
     with a3:
         if st.button("Clear", use_container_width=True):
