@@ -2,8 +2,8 @@
 
 Every human review note keeps the diff version it was attached to (SHAs, path,
 old/new line range, snippet). Later commits are replayed in order so a fix is
-found even when earlier commits shifted the line. ``MRR fixes`` commits are
-preferred, but any later commit can still count.
+found even when earlier commits shifted the line. Commit titles are ignored:
+a fix is a later commit that touches the anchored file or lines.
 """
 
 from __future__ import annotations
@@ -11,11 +11,9 @@ from __future__ import annotations
 from scripts.gitlab.link import (
     FILE_CONFIDENCE,
     FILE_LINE_CONFIDENCE,
-    MR_CONFIDENCE,
     Hunk,
     _span,
     comment_target,
-    is_fix_message,
     parse_hunks,
     parse_time,
 )
@@ -277,7 +275,6 @@ def trace_thread(
                 "sha": sha,
                 "message": _message(commit),
                 "created_at": commit.get("created_at") or commit.get("committed_date") or "",
-                "preferred": is_fix_message(_message(commit), fix_pattern),
                 "hunk_index": hunks.index(hunk) if hunk in hunks else 0,
                 "mapped_line_start": new_start,
                 "mapped_line_end": new_end,
@@ -304,7 +301,6 @@ def trace_thread(
                     "sha": sha,
                     "message": _message(commit),
                     "created_at": commit.get("created_at") or commit.get("committed_date") or "",
-                    "preferred": is_fix_message(_message(commit), fix_pattern),
                     "hunk_index": 0,
                     "before": before,
                     "after": after or diff,
@@ -312,52 +308,24 @@ def trace_thread(
                 }
             )
 
-    def _prefer(rows: list[dict]) -> dict | None:
-        preferred = [row for row in rows if row.get("preferred")]
-        return (preferred or rows or [None])[0]
-
     primary = None
     status = "unclear"
     confidence = 0.0
     link = "none"
+    resolved = bool(note.get("resolved"))
     if changed_by:
-        primary = _prefer(changed_by)
+        primary = changed_by[0]
         status = "linked"
         link = "file_line"
-        confidence = FILE_LINE_CONFIDENCE if primary and primary.get("preferred") else OTHER_LINE_CONFIDENCE
+        confidence = min(0.95, FILE_LINE_CONFIDENCE + (0.1 if resolved else 0))
     elif file_hits:
-        primary = _prefer(file_hits)
+        primary = file_hits[0]
         status = "addressed_elsewhere"
         link = "file"
-        confidence = FILE_CONFIDENCE if primary and primary.get("preferred") else 0.4
-    elif not path:
-        preferred_later = [commit for commit in later if is_fix_message(_message(commit), fix_pattern)]
-        chosen = (preferred_later or later[:1] or [None])[0]
-        if chosen is not None and preferred_later:
-            sha = _sha(chosen)
-            _path, everything = _all_hunks(diffs_by_sha.get(sha) or [])
-            before, after, diff = _join_hunks(everything)
-            primary = {
-                "sha": sha,
-                "message": _message(chosen),
-                "created_at": chosen.get("created_at") or "",
-                "preferred": True,
-                "hunk_index": 0,
-                "before": before,
-                "after": after or diff,
-                "diff": diff,
-            }
-            status = "addressed_elsewhere"
-            link = "mr"
-            confidence = MR_CONFIDENCE
-        elif chosen is not None:
-            status = "unclear"
-            link = "none"
-            confidence = 0.15
-        else:
-            status = "not_addressed" if note_time is not None else "unclear"
+        confidence = FILE_CONFIDENCE
     else:
         status = "not_addressed" if note_time is not None else "unclear"
+        confidence = 0.0
 
     if not anchor["snippet"] and primary and primary.get("before"):
         anchor["snippet"] = primary["before"]

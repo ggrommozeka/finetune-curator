@@ -137,7 +137,7 @@ def test_line_movement_and_non_fix_commits():
     }
     traced = trace_thread({"root": note, "replies": [], "discussion_id": "d"}, [shift, edit], diffs, {})
     assert traced["status"] == "linked"
-    assert traced["confidence"] == 0.7
+    assert traced["confidence"] == 0.8
     assert traced["commit_sha"] == "edit"
     assert "parse_config" in traced["after"]
     assert [item["sha"] for item in traced["changed_by"]] == ["edit"]
@@ -173,7 +173,7 @@ def test_link_file_line_then_file_then_mr():
     }
     linked = link_comment(note, [early, later], diffs)
     assert linked["link"] == "file_line"
-    assert linked["confidence"] == 0.9
+    assert linked["confidence"] == 0.8
     assert linked["commit_sha"] == "bbb"
     assert "parse_config" in linked["after"]
 
@@ -190,9 +190,7 @@ def test_link_file_line_then_file_then_mr():
         [early, later],
         diffs,
     )
-    assert mr_level["link"] == "mr"
-    assert mr_level["confidence"] == 0.3
-    assert mr_level["commit_sha"] == "aaa"
+    assert mr_level is None
 
     too_late = link_comment(
         {**note, "created_at": "2024-03-02T00:00:00Z"},
@@ -222,8 +220,8 @@ def test_export_fixture_anonymizes_and_builds_dpo(tmp_path: Path):
     )
     assert stats["merge_requests"] == 1
     assert stats["file_line"] == 1
-    assert stats["mr"] == 1
-    assert stats["unlinked"] == 1
+    assert stats["mr"] == 0
+    assert stats["unlinked"] == 2
     assert stats["comments"] == 3
     blob = json.dumps(records)
     assert TOKEN not in blob
@@ -235,7 +233,7 @@ def test_export_fixture_anonymizes_and_builds_dpo(tmp_path: Path):
     assert "<email>" in blob
     assert "https://" not in blob
     by_link = {record["gitlab"]["link"]: record for record in records}
-    assert set(by_link) == {"file_line", "mr"}
+    assert set(by_link) == {"file_line"}
     sft = by_link["file_line"]
     assert sft["source"] == "gitlab_review"
     assert sft["messages"][0]["role"] == "user"
@@ -254,6 +252,46 @@ def test_export_fixture_anonymizes_and_builds_dpo(tmp_path: Path):
     )
     assert outside_stats["merge_requests"] == 0
     assert outside == []
+
+
+def test_comment_fix_and_team_lead_polish_are_separate():
+    from scripts.gitlab.classify import classify_commits
+    from scripts.gitlab.polish import build_polish_records
+    from scripts.gitlab.signals import SignalConfig, is_mrr_title
+
+    assert is_mrr_title("MRR fixes: rename")
+    assert is_mrr_title("mrr: tighten")
+    assert is_mrr_title("Please MRR this helper")
+    assert not is_mrr_title("summary of the change")
+
+    import json as _json
+    payload = _json.loads(FIXTURE.read_text(encoding="utf-8"))
+    mr = next(item["pages"][0]["body"] for item in payload["responses"] if item["path"].endswith("/merge_requests/7") and "group" not in item["path"])
+    discussions = next(item["pages"][0]["body"] for item in payload["responses"] if item["path"].endswith("/discussions"))
+    commits = next(item["pages"][0]["body"] for item in payload["responses"] if item["path"].endswith("/commits"))
+    config = SignalConfig(team_leads=("lead@company.com", "teamlead"), mrr_pattern=r"\bmrr\b")
+    roles = {row["sha"][:4]: row["role"] for row in classify_commits(commits, mr, discussions, config)}
+    assert roles["aaaa"] == "author"
+    assert roles["bbbb"] == "author_fix"
+    assert roles["dddd"] == "team_lead_mrr"
+    assert roles["eeee"] == "team_lead_other"
+
+    diffs = {
+        "dddddddddddddddddddddddddddddddddddddddd": [
+            {"new_path": "app.py", "old_path": "app.py", "diff": "@@ -1,1 +1,1 @@\n-raw\n+parsed\n"}
+        ],
+        "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": [
+            {"new_path": "app.py", "old_path": "app.py", "diff": "@@ -1,1 +1,2 @@\n import sys\n+import logging\n"}
+        ],
+    }
+    records = build_polish_records(mr, commits, diffs, discussions, config, complete_fn=lambda _messages: "error handling")
+    kinds = {record["gitlab"]["role"]: record for record in records}
+    assert set(kinds) == {"team_lead_mrr", "team_lead_other"}
+    assert kinds["team_lead_mrr"]["source"] == "gitlab_polish"
+    assert kinds["team_lead_mrr"]["gitlab"]["mrr"] is True
+    assert kinds["team_lead_mrr"]["gitlab"]["polish"] == "error handling"
+    assert "Commit message:" in kinds["team_lead_mrr"]["messages"][0]["content"]
+    assert "Review comment:" not in kinds["team_lead_mrr"]["messages"][0]["content"]
 
 
 def test_anonymizer_whole_words_only():
@@ -330,7 +368,7 @@ def test_sync_is_incremental_and_process_is_offline(tmp_path: Path):
 
     client.transport = offline
     stats = process_store(store, ["1!7"], reviewer="teamlead", anonymize=True, anonymize_urls=True)
-    assert stats["examples"] == 2
+    assert stats["examples"] == 1
     assert stats["file_line"] == 1
     example_id = store.examples_for(1, 7)[0]["id"]
     store.set_decision(example_id, "keep", user_text="EDITED INPUT", assistant_text="EDITED OUTPUT")
@@ -494,7 +532,7 @@ def test_cli_fixture_does_not_leak_token(tmp_path: Path):
     assert "lead@company.com" not in published
     assert "https://" not in published
     rows = [json.loads(line) for line in sft.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 2
+    assert len(rows) == 1
     rebuilt = tmp_path / "dpo2.jsonl"
     dpo_only = run(["export", "--dpo-from", str(sft), "--dpo", str(rebuilt)])
     assert dpo_only.returncode == 0, dpo_only.stderr

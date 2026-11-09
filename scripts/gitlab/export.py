@@ -6,7 +6,7 @@ from datetime import datetime
 
 from scripts.gitlab.client import merge_request_path
 from scripts.gitlab.examples import apply_anonymization, build_sft_record
-from scripts.gitlab.link import DEFAULT_FIX_PATTERN, fix_commits, in_range, parse_time
+from scripts.gitlab.link import DEFAULT_FIX_PATTERN, in_range, parse_time
 
 
 def _mr_moment(mr: dict) -> datetime | None:
@@ -59,6 +59,7 @@ def records_from_bundle(
     fix_pattern: str,
     line_pad: int,
     max_chars: int,
+    signal_config=None,
 ) -> tuple[list[dict], dict]:
     """Link comments to fixes using only data already in memory."""
     from scripts.gitlab.trace import build_traces
@@ -72,7 +73,15 @@ def records_from_bundle(
         fix_pattern=fix_pattern,
         line_pad=line_pad,
     )
-    return records_from_traces(mr, traces, max_chars=max_chars)
+    records, stats = records_from_traces(mr, traces, max_chars=max_chars)
+    from scripts.gitlab.polish import build_polish_records
+    from scripts.gitlab.signals import SignalConfig
+
+    config = signal_config or SignalConfig(team_leads=tuple(), mrr_pattern=fix_pattern)
+    polish = build_polish_records(mr, commits, diffs_by_sha, discussions, config, max_chars=max_chars)
+    records.extend(polish)
+    stats["polish"] = len(polish)
+    return records, stats
 
 
 def records_from_traces(mr: dict, traces: list[dict], max_chars: int) -> tuple[list[dict], dict]:
@@ -135,6 +144,7 @@ def records_for_mr(
     fix_pattern: str,
     line_pad: int,
     max_chars: int,
+    signal_config=None,
 ) -> tuple[list[dict], dict]:
     project_id = mr.get("project_id")
     iid = mr.get("iid")
@@ -143,13 +153,12 @@ def records_for_mr(
     base = f"/api/v4/projects/{project_id}/merge_requests/{iid}"
     discussions = client.get_all(base + "/discussions")
     commits = client.get_all(base + "/commits")
-    fixes = fix_commits(commits, fix_pattern)
     diffs_by_sha: dict[str, list] = {}
-    for commit in fixes:
+    for commit in commits:
         sha = str(commit.get("id") or "")
         if not sha:
             continue
-        diffs_by_sha[sha] = client.get_all(f"/api/v4/projects/{project_id}/repository/commits/{sha}/diff")
+        diffs_by_sha[sha] = client.get_all_optional(f"/api/v4/projects/{project_id}/repository/commits/{sha}/diff")
     return records_from_bundle(
         mr,
         discussions,
@@ -159,6 +168,7 @@ def records_for_mr(
         fix_pattern=fix_pattern,
         line_pad=line_pad,
         max_chars=max_chars,
+        signal_config=signal_config,
     )
 
 
@@ -175,10 +185,11 @@ def export_records(
     max_chars: int = 8000,
     anonymize: bool = False,
     anonymize_urls: bool = False,
+    signal_config=None,
 ) -> tuple[list[dict], dict]:
     mrs = list_merge_requests(client, projects, groups, since, until)
     records: list[dict] = []
-    totals = {"merge_requests": len(mrs), "comments": 0, "file_line": 0, "file": 0, "mr": 0, "unlinked": 0}
+    totals = {"merge_requests": len(mrs), "comments": 0, "file_line": 0, "file": 0, "mr": 0, "unlinked": 0, "polish": 0}
     for mr in mrs:
         batch, stats = records_for_mr(
             client,
@@ -187,9 +198,10 @@ def export_records(
             fix_pattern=fix_pattern,
             line_pad=line_pad,
             max_chars=max_chars,
+            signal_config=signal_config,
         )
         records.extend(batch)
-        for key in ("comments", "file_line", "file", "mr", "unlinked"):
+        for key in ("comments", "file_line", "file", "mr", "unlinked", "polish"):
             totals[key] += stats.get(key, 0)
     if anonymize or anonymize_urls:
         records = apply_anonymization(records, strip_urls=anonymize_urls)

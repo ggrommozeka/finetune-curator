@@ -10,6 +10,7 @@ from scripts.gitlab.client import quote_id
 from scripts.gitlab.anonymize import Anonymizer
 from scripts.gitlab.export import list_merge_requests
 from scripts.gitlab.link import DEFAULT_FIX_PATTERN
+from scripts.gitlab.signals import SignalConfig
 from scripts.gitlab.store import GitlabStore
 
 
@@ -255,6 +256,8 @@ def process_store(
     max_chars: int = 8000,
     anonymize: bool = False,
     anonymize_urls: bool = False,
+    signal_config: SignalConfig | None = None,
+    complete_fn=None,
 ) -> dict:
     """Phase 2. Reads the store only and replaces example rows for each MR."""
     totals = {"merge_requests": 0, "examples": 0, "comments": 0, "file_line": 0, "file": 0, "mr": 0, "unlinked": 0}
@@ -281,7 +284,29 @@ def process_store(
         if anonymize or anonymize_urls:
             traces = _anonymize_traces(traces, strip_urls=anonymize_urls)
         store.replace_traces(project_id, iid, traces)
+        from scripts.gitlab.classify import classify_commits
+        from scripts.gitlab.polish import build_polish_records
+        from scripts.gitlab.signals import SignalConfig, load_signal_config
+
+        config = signal_config or load_signal_config(mrr_pattern=fix_pattern)
+        roles = classify_commits(bundle["commits"], bundle["mr"], bundle["discussions"], config)
+        store.replace_roles(project_id, iid, roles)
         records, stats = records_from_traces(bundle["mr"], traces, max_chars)
+        polish = build_polish_records(
+            bundle["mr"],
+            bundle["commits"],
+            bundle["diffs_by_sha"],
+            bundle["discussions"],
+            config,
+            max_chars=max_chars,
+            complete_fn=complete_fn,
+        )
+        if anonymize or anonymize_urls:
+            from scripts.gitlab.examples import apply_anonymization
+
+            polish = apply_anonymization(polish, strip_urls=anonymize_urls)
+        records.extend(polish)
+        stats["polish"] = len(polish)
         if anonymize_urls:
             for record in records:
                 gitlab = record.get("gitlab") or {}

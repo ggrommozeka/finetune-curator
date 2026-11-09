@@ -6,12 +6,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-FILE_LINE_CONFIDENCE = 0.9
+FILE_LINE_CONFIDENCE = 0.8
 FILE_CONFIDENCE = 0.55
 MR_CONFIDENCE = 0.3
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-DEFAULT_FIX_PATTERN = r"mrr\s*fixes"
+DEFAULT_FIX_PATTERN = r"\bmrr\b"
 
 
 @dataclass

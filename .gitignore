@@ -12,6 +12,7 @@ data/gitlab_cache/
 data/gitlab/
 !data/.gitkeep
 .env
+gitlab.json
 *.egg-info/
 dist/
 build/
