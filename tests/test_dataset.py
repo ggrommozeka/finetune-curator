@@ -454,6 +454,64 @@ def test_review_context_source_model_and_author_metrics():
     assert compared["models"]["ornith-1.0-9b"]["false_positive_rate"] == 0.0
 
 
+def test_home_27b_profile_is_short_qlora_and_smoke_reports_both_gpus(tmp_path: Path):
+    from scripts.dataset.smoke import simulate_smoke
+    from scripts.smoke_train import main as smoke_main
+
+    profile_path = Path(__file__).resolve().parents[1] / "configs" / "train" / "author-qlora-2x16gb.json"
+    sessions = tmp_path / "sessions.jsonl"
+    _write_jsonl(
+        sessions,
+        [
+            _session(
+                "long-agent",
+                [
+                    {"role": "user", "content": "EARLY-MARKER " + ("e" * 3000)},
+                    {"role": "assistant", "content": "middle " * 400},
+                    {"role": "user", "content": "now do the task"},
+                    {"role": "assistant", "content": "wrong answer"},
+                    {"role": "user", "content": "No, do it this way"},
+                    {"role": "assistant", "content": "right answer"},
+                ],
+            )
+        ],
+    )
+    decisions = tmp_path / "decisions.json"
+    decisions.write_text(json.dumps({"labels": {"long-agent": "keep"}}), encoding="utf-8")
+    result = build_samples(
+        opencode_path=sessions,
+        decisions_path=decisions,
+        ratios={"agentic": 1, "style": 0, "review": 0},
+        eval_ratio=0,
+        max_tokens=80,
+        variant="short",
+    )
+    kinds = {sample.kind for sample in result["train"]}
+    assert "trajectory" not in kinds
+    assert "correction" not in kinds
+    assert "correction-step" in kinds
+    step = next(sample for sample in result["train"] if sample.kind == "correction-step")
+    blob = json.dumps(step.dpo["prompt"])
+    assert "EARLY-MARKER" not in blob
+    assert step.dpo["chosen"][0]["content"] == "right answer"
+    assert step.dpo["rejected"][0]["content"] == "wrong answer"
+    assert result["manifest"]["variant"] == "short"
+    report = simulate_smoke(json.loads(profile_path.read_text(encoding="utf-8")), 2)
+    assert report["peak_vram_mib"]["0"] < 16 * 1024
+    assert report["peak_vram_mib"]["1"] < 16 * 1024
+    assert report["weight_cpu_offload"] is False
+    assert report["tokens_per_sec"] > 0
+    import io
+    from contextlib import redirect_stdout
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        smoke_main(["--profile", str(profile_path), "--steps", "2", "--simulate"])
+    printed = json.loads(buffer.getvalue())
+    assert printed["profile"] == "author-qlora-2x16gb"
+    assert printed["max_seq_length"] == 4096
+
+
 def test_hardware_profiles_match_the_two_machines():
     root = Path(__file__).resolve().parents[1] / "configs" / "train"
     qlora = json.loads((root / "reviewer-qlora-1x16gb.json").read_text(encoding="utf-8"))

@@ -170,6 +170,19 @@ def _truncate(message: dict, max_tokens: int, chars_per_token: float) -> dict:
     return copied
 
 
+def trim_context(messages: list[dict], max_tokens: int, chars_per_token: float = 3.0) -> list[dict]:
+    """Keep the system prompt and the most recent turns that fit in ``max_tokens``."""
+    system = [dict(message) for message in messages if message.get("role") == "system"][:1]
+    body = [dict(message) for message in messages if message.get("role") != "system"]
+    kept: list[dict] = []
+    for message in reversed(body):
+        trial = system + [message, *kept]
+        if sequence_tokens(trial, chars_per_token) > max_tokens and kept:
+            break
+        kept.insert(0, message)
+    return shrink_messages(system + kept, max_tokens, chars_per_token)
+
+
 def shrink_messages(messages: list[dict], max_tokens: int, chars_per_token: float) -> list[dict]:
     """Shorten the longest text until the rendered messages fit the budget."""
     current = [dict(message) for message in messages]

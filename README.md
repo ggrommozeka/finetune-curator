@@ -358,6 +358,7 @@ Local box: two RTX 5060 Ti 16GB cards (Blackwell, `sm_120`), no NVLink, i9-9900K
 | `reviewer-qlora-1x16gb` | 9B | local | 4-bit QLoRA | 1x 16GB | 8192 | weights about 6.5GB; training is higher and can fill the card | yes, batch 1, if it does not OOM |
 | `reviewer-bf16-2x16gb` | 9B | local | bf16 LoRA, `device_map="balanced"` | 2x 16GB | 8192 | about 22GB | yes, sharded; neither card may pass 16GB |
 | `author-bf16-1x80gb` | 27B | rented A100 or H100 80GB | bf16 LoRA | 1x 80GB | 32768 | about 56GB | no on the local GPUs |
+| `author-qlora-2x16gb` | 27B | local | 4-bit QLoRA, sharded, short samples | 2x 16GB | 4096 | 4-bit weights about 17GB plus training | aimed at both cards; smoke-test before a real run |
 
 Unsloth's published bf16 LoRA figures are 22GB (9B) and 56GB (27B). The 6.5GB 9B number is their 4-bit inference size, not a training measurement. 4-bit training of Qwen3.5 is the quality risk described below. Configs are in `configs/train/`.
 
@@ -408,7 +409,7 @@ Use `per_device_train_batch_size=1` and `gradient_accumulation_steps=8`.
 
 ### 27B author, on a rented 80GB GPU
 
-Train `Qwen/Qwen3.5-27B` on one rented A100 80GB or H100 80GB with bf16 LoRA (`configs/train/author-bf16-1x80gb.json`). Unsloth's figure for that run is about 56GB, which fits in 80GB and does not fit in 32GB of local GPU memory. Do not split this model onto the two 16GB cards, and do not offload it to the 80GB of system RAM.
+Train `Qwen/Qwen3.5-27B` on one rented A100 80GB or H100 80GB with bf16 LoRA (`configs/train/author-bf16-1x80gb.json`). Unsloth's figure for that run is about 56GB, which fits in 80GB and does not fit in 32GB of local GPU memory. Do not run this bf16 recipe on the two 16GB cards, and do not offload the 27B weights onto the 80GB of system RAM. The at-home profile below is a separate, lower-quality 4-bit run.
 
 ```python
 model, tokenizer = FastLanguageModel.from_pretrained(
@@ -421,6 +422,34 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 ```
 
 The rest of the LoRA and `SFTTrainer` setup matches the 9B block, with `max_length=32768` and the author JSONL. There is no separate Qwen3.8 training page that recommends 4-bit, so this 27B uses the Qwen3.5 bf16 recipe. After training, download the adapter, merge or convert it to GGUF, and serve that file on the local machine with llama.cpp. The rented GPU is only for the training run.
+
+### 27B at home
+
+`configs/train/author-qlora-2x16gb.json` trains the same 27B without a rental. It is 4-bit QLoRA sharded with `device_map="balanced"` across both 16GB cards. Sequences are 4096 tokens by default and may be set from 2048 to 4096. LoRA rank defaults to 8 and may be 8–16. `target_modules` lists the attention and MLP projections and can be edited in the file. Unsloth gradient checkpointing keeps the recomputed activations in pinned system RAM. The 4-bit weights stay on the GPUs. bitsandbytes rejects a 4-bit device map that spills weights to CPU, and this profile does not ask for that. Batch size is 1, gradient accumulation is 16, and the optimizer is paged 8-bit AdamW.
+
+The dataset variant is `short`. It keeps style pairs (team-lead polish and comment-then-fix, before and after) and step-level DPO pairs (the rejected agent step against the step after the user correction). The DPO prompt is only the most recent turns that fit. Full successful trajectories are left out, so this run does not teach long tool-calling sessions.
+
+```bash
+python -m scripts.build_dataset \
+  --profile configs/train/author-qlora-2x16gb.json \
+  --input data/raw_scored.jsonl \
+  --decisions data/decisions.json \
+  --gitlab-store data/gitlab \
+  --output-dir data/finetune/author-home
+
+python -m scripts.smoke_train --profile configs/train/author-qlora-2x16gb.json --steps 2
+```
+
+The smoke test loads the checkpoint, runs those steps at the configured length, and prints peak MiB on each GPU and tokens per second. If `fits` is false, shorten `max_seq_length` before a real run. `--simulate` checks the profile and does not load weights.
+
+Qwen3.5 4-bit QLoRA is the quality risk Unsloth warns about, and short samples cannot replace the 32k trajectory training on the rented GPU. Do not serve this adapter until it has been compared with the base model on the same held-out file:
+
+```bash
+python -m scripts.eval_dataset \
+  --eval data/finetune/author-home/eval.jsonl \
+  --eval-dpo data/finetune/author-home/eval_dpo.jsonl \
+  --models configs/train/author-home-compare.json
+```
 
 DPO uses `train_dpo.jsonl` (`prompt`, `chosen`, and `rejected` are message lists) with TRL's `DPOTrainer` and the same template. If the export was built with `--thinking keep`, do not disable thinking at serve time.
 

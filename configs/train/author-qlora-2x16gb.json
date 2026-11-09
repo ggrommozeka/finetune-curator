@@ -1,0 +1,48 @@
+{
+  "profile": "author-qlora-2x16gb",
+  "target": "author",
+  "base_model": "Qwen/Qwen3.5-27B",
+  "chat_template": "qwen3",
+  "hardware": {
+    "machine": "local",
+    "gpus": ["RTX 5060 Ti 16GB", "RTX 5060 Ti 16GB"],
+    "gpu_count": 2,
+    "nvlink": false,
+    "system_ram_gb": 80
+  },
+  "training": {
+    "precision": "qlora-4bit",
+    "load_in_4bit": true,
+    "load_in_16bit": false,
+    "full_finetuning": false,
+    "device_map": "balanced",
+    "weight_cpu_offload": false,
+    "activation_offload": "unsloth",
+    "launcher": "one process, not torchrun",
+    "max_seq_length": 4096,
+    "min_seq_length": 2048,
+    "max_seq_length_limit": 4096,
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 16,
+    "gradient_checkpointing": "unsloth",
+    "optimizer": "paged_adamw_8bit",
+    "learning_rate": 0.0002,
+    "lora_r": 8,
+    "lora_r_min": 8,
+    "lora_r_max": 16,
+    "lora_alpha": 8,
+    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  },
+  "dataset": {
+    "task": "author",
+    "variant": "short",
+    "max_tokens": 4096,
+    "min_tokens": 2048
+  },
+  "warnings": [
+    "4-bit QLoRA on Qwen3.5 has a larger quantization gap than Unsloth accepts for a quality run. This profile is the at-home option, not the accurate one.",
+    "Short samples do not teach long tool-calling trajectories. The rented 80GB bf16 profile does.",
+    "Compare this adapter with the base model on the same held-out set before serving it: python -m scripts.eval_dataset --eval data/finetune/author-home/eval.jsonl --eval-dpo data/finetune/author-home/eval_dpo.jsonl --models configs/train/author-home-compare.json",
+    "Activation checkpointing may use system RAM. Model weights stay on the two GPUs. bitsandbytes rejects a 4-bit load that spills weights to CPU."
+  ]
+}

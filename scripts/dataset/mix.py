@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections import defaultdict
 
-from scripts.dataset.format import sequence_tokens, split_messages
+from scripts.dataset.format import sequence_tokens, split_messages, trim_context
 from scripts.dataset.tasks import Sample
 from scripts.gitlab.anonymize import Anonymizer
 from scripts.rules.parsing import strip_thinking
@@ -145,6 +145,55 @@ def mix_ratios(samples: list[Sample], ratios: dict[str, float]) -> list[Sample]:
         ordered = sorted(grouped[task], key=lambda item: item.id)
         picked.extend(ordered[:target])
     return picked
+
+
+_SHORT_STYLE = {"polish", "polish-other", "comment-fix"}
+
+
+def to_short_sample(sample: Sample, max_tokens: int, chars_per_token: float = 3.0) -> Sample | None:
+    """Style pairs and one-step correction DPO only. Full trajectories are left out."""
+    if sample.task == "style" and sample.kind in _SHORT_STYLE:
+        prompt = trim_context(sample.dpo["prompt"], max_tokens, chars_per_token) if sample.dpo else None
+        messages = trim_context(sample.messages, max_tokens, chars_per_token)
+        dpo = None
+        if sample.dpo and prompt is not None:
+            dpo = {"prompt": prompt, "chosen": sample.dpo["chosen"], "rejected": sample.dpo["rejected"]}
+        return Sample(
+            id=sample.id,
+            task=sample.task,
+            source=sample.source,
+            machine=sample.machine,
+            group=sample.group,
+            kind=sample.kind,
+            messages=messages,
+            dpo=dpo,
+            gold=sample.gold,
+            extra={**sample.extra, "variant": "short"},
+        )
+    if sample.task == "agentic" and sample.dpo and sample.kind in {"correction", "correction-dpo"}:
+        prompt = trim_context(sample.dpo["prompt"], max_tokens, chars_per_token)
+        return Sample(
+            id=f"{sample.id}-step",
+            task="agentic",
+            source=sample.source,
+            machine=sample.machine,
+            group=sample.group,
+            kind="correction-step",
+            messages=prompt + list(sample.dpo["chosen"]),
+            dpo={"prompt": prompt, "chosen": sample.dpo["chosen"], "rejected": sample.dpo["rejected"]},
+            gold=sample.gold,
+            extra={**sample.extra, "variant": "short"},
+        )
+    return None
+
+
+def select_short(samples: list[Sample], max_tokens: int, chars_per_token: float = 3.0) -> list[Sample]:
+    kept = []
+    for sample in samples:
+        short = to_short_sample(sample, max_tokens, chars_per_token)
+        if short is not None:
+            kept.append(short)
+    return kept
 
 
 def prefer_source_models(samples: list[Sample], weights: dict[str, float]) -> list[Sample]:

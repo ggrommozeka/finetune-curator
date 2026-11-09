@@ -19,7 +19,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gitlab-store", default="data/gitlab")
     parser.add_argument("--patterns-store", default="data/patterns", help="Optional machine labels")
     parser.add_argument("--output-dir", default="data/finetune")
-    parser.add_argument("--task", choices=["all", "author", "agentic", "style", "review"], default="all")
+    parser.add_argument("--profile", default=None, help="Training profile JSON. Dataset task, variant, and token budget come from it unless overridden.")
+    parser.add_argument("--variant", choices=["full", "short"], default=None, help="short keeps style pairs and step-level DPO only.")
+    parser.add_argument("--task", choices=["all", "author", "agentic", "style", "review"], default=None)
     parser.add_argument("--source-model", action="append", default=None, help="Keep OpenCode trajectories whose model label contains this text. Repeatable.")
     parser.add_argument("--model-weight", action="append", default=None, help="pattern=weight, for example claude=3. Preferred models are kept first.")
     parser.add_argument(
@@ -77,8 +79,25 @@ def _conventions(args) -> str:
     return "\n".join(f"- {rule['text']}" for rule in rules[:12])
 
 
+def load_profile(path: str | None) -> dict:
+    if not path:
+        return {}
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit(f"{path} must be a JSON object")
+    return data
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    profile = load_profile(args.profile)
+    dataset = profile.get("dataset") or {}
+    args.task = args.task or dataset.get("task") or "all"
+    variant = args.variant or dataset.get("variant") or "full"
+    if args.max_tokens is None and dataset.get("max_tokens"):
+        args.max_tokens = int(dataset["max_tokens"])
+    if args.base_model is None and profile.get("base_model"):
+        args.base_model = profile["base_model"]
     if args.task == "author":
         tasks = {"agentic", "style"}
     elif args.task == "all":
@@ -124,6 +143,7 @@ def main(argv: list[str] | None = None) -> None:
         source_models=set(args.source_model or []) or None,
         model_weights=weights,
         conventions=_conventions(args),
+        variant=variant,
     )
     written = write_dataset(result, Path(args.output_dir))
     print(json.dumps({"manifest": result["manifest"], "files": written}, ensure_ascii=False, indent=2))

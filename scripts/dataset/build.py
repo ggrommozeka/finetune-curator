@@ -15,6 +15,7 @@ from scripts.dataset.mix import (
     manifest_block,
     mix_ratios,
     prefer_source_models,
+    select_short,
 )
 from scripts.dataset.targets import resolve_target
 from scripts.dataset.tasks import from_gitlab_store, from_opencode, load_machine_labels
@@ -49,6 +50,7 @@ def build_samples(
     source_models: set[str] | None = None,
     model_weights: dict[str, float] | None = None,
     conventions: str = "",
+    variant: str = "full",
 ) -> dict:
     target = resolve_target(tasks, base_model, chat_template)
     chat_template = target["chat_template"]
@@ -84,6 +86,10 @@ def build_samples(
             or any(item in (sample.extra.get("source_model") or "").lower() for item in allowed)
         ]
     samples = prefer_source_models(samples, model_weights or {})
+    if variant == "short":
+        samples = select_short(samples, max_tokens, chars_per_token)
+    elif variant != "full":
+        raise ValueError(f"Unknown dataset variant {variant!r}")
     samples = dedup(samples)
     samples = apply_thinking(samples, thinking)
     samples = fit_length(samples, max_tokens, chars_per_token)
@@ -103,6 +109,7 @@ def build_samples(
             "base_model": target["base_model"],
             "base_model_candidates": target["candidates"],
             "train_precision": target["precision"],
+            "variant": variant,
             "target_model": "qwen3.5-9b" if tasks == {"review"} else "qwen3.5-27b",
             "tasks": sorted(tasks) if tasks else ["agentic", "style", "review"],
             "max_tokens": max_tokens,
