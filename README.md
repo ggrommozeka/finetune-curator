@@ -11,8 +11,8 @@ Works with OpenCode (and other LogMiner sources: Claude Code, Cline, Codex, Qwen
 1. **Export** — thin wrapper around [LogMiner](https://github.com/pearsonkyle/LogMiner) for OpenCode history
 2. **Viewer** — Streamlit UI with **Keep / Discard**, score filters, trajectory browser, and a **Правила** page for proposed harness rules
 3. **Export approved** — writes only kept sessions to a clean JSONL ready for Unsloth
-4. **Harness rules** — an OpenAI-compatible model proposes rules from discarded sessions, low scores, reviewer notes, and GitLab review comments; you approve them; export Markdown + JSON
-5. **GitLab reviews** — merged MRs become SFT and DPO examples from team-lead comments and the `MRR fixes` commits that followed them
+4. **Proposals** — one shared list (`kind`: rule or skill, text, source session ids, status). Per-session generation and GitLab review comments write that same file, and the same viewer page approves them.
+5. **GitLab reviews** — merged MRs become SFT and DPO examples, and linked review comments can be proposed as rules through the shared proposal file.
 
 The dataset flow is unchanged. Rule files are a separate output.
 
