@@ -275,6 +275,43 @@ python -m scripts.export_gitlab_mrr process \
   --anonymize
 ```
 
+## Pattern mining
+
+This is not a replay or A/B harness. It looks across many OpenCode sessions (and linked GitLab review comments, when that store exists) for failures that keep showing up, then recommends either a few general system-prompt rules or a task-specific skill.
+
+Histories from several machines are imported into `data/patterns/` (gitignored). The same session in two exports is stored once and tagged with every machine. Re-import only adds sessions that were not seen for that source. OpenCode sqlite files are read as `opencode-v2` (session/message/part JSON), `opencode-v1` (role/content columns), or a session blob. Anything else is reported with the table list instead of being guessed.
+
+```bash
+python -m scripts.mine_patterns import --source laptop-a --input data/laptop-a.jsonl
+python -m scripts.mine_patterns import --source laptop-b --db ~/.local/share/opencode/opencode.db
+python -m scripts.mine_patterns import --source gitlab --gitlab-store data/gitlab
+
+python -m scripts.mine_patterns annotate --base-url http://127.0.0.1:8080/v1
+python -m scripts.mine_patterns cluster --min-size 3
+python -m scripts.mine_patterns recommend --base-url http://127.0.0.1:8080/v1
+```
+
+Annotation is one JSON object per session (task type, project, tools, outcome, where it failed, how the user corrected it, what worked). It is cached, so a second run skips finished sessions. Clustering uses an OpenAI-compatible embeddings endpoint when `--embeddings-url` and `--embeddings-model` are set, and TF-IDF cosine otherwise. Clusters smaller than `--min-size` (default 3) are noise and are not recommended.
+
+A pattern becomes a **rule** only when it spans at least three task types. Otherwise it becomes a **skill**: `.opencode/skills/<id>/SKILL.md` is the portable layout (YAML `name` and `description`, then steps and examples). Conflicts with existing rule text and with the same error type on successful sessions are stored on the proposal.
+
+The **Паттерны** page lists clusters by frequency and failure rate, filters by machine, project, and task type, shows example sessions, and approves, edits, or rejects each proposal as a rule or a skill.
+
+```bash
+python -m scripts.mine_patterns export \
+  --rules-md data/patterns_rules.md \
+  --rules-json data/patterns_rules.json \
+  --skills-dir skills \
+  --version v1
+
+python -m scripts.mine_patterns report --decisions data/decisions.json --error-type loop
+python -m scripts.mine_patterns rollback --version v1
+```
+
+Export records the file versions and the adoption time. The report compares sessions dated before and after that time: mean LogMiner score, discard rate, how often the cluster's error type comes back, and how often the user had to correct the agent. Rollback copies that version's files back and retires later versions. There is no replay loop.
+
+`annotate` and `recommend` accept `--mock-response` for a canned JSON reply. The default live endpoint is the same llama-server client as rule proposal (`http://localhost:8080/v1`, thinking off, low temperature).
+
 ## Layout
 
 ```
@@ -288,13 +325,16 @@ finetune-curator/
 │   ├── propose_rules.py      # LLM rule proposals
 │   ├── export_rules.py       # Approved rules → Markdown + JSON
 │   ├── export_gitlab_mrr.py  # GitLab sync / process / export
+│   ├── mine_patterns.py      # import, annotate, cluster, export, rollback
 │   ├── rules/                # selection, merge, endpoint, export
-│   └── gitlab/               # client, store, sync, linking, anonymize
+│   ├── gitlab/               # client, store, sync, linking, anonymize
+│   └── patterns/             # multi-machine import, clusters, skills
 ├── viewer/
 │   ├── app.py                # Streamlit keep/discard + rules + GitLab
 │   ├── rules_page.py
 │   ├── gitlab_page.py        # stored MRs, offline process, example review
-│   └── gitlab_panel.py       # before/after review card
+│   ├── gitlab_panel.py       # before/after review card
+│   └── patterns_page.py      # cluster review: rule vs skill
 ├── tests/
 └── data/                     # local only (gitignored)
 ```
