@@ -22,7 +22,7 @@ from scripts.gitlab.signals import SignalConfig, load_signal_config
 
 DEFAULT_RATIOS = {"agentic": 0.5, "style": 0.25, "review": 0.25}
 LARGE_MAX_TOKENS = 32_000
-REVIEW_MAX_TOKENS = 16_384
+REVIEW_MAX_TOKENS = 8_192
 REVIEW_CONTEXT_LINES = 20
 
 

@@ -28,7 +28,7 @@ TARGETS = {
         ],
         "precision": "bf16-lora",
         "vram": "~22GB",
-        "max_tokens": 16_384,
+        "max_tokens": 8_192,
     },
 }
 

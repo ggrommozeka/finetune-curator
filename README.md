@@ -324,7 +324,7 @@ Agentic and style target the Qwen3-family 27B served with llama.cpp (about 200k 
 
 `--agentic`, `--style`, and `--review` are mixing weights for `--task all`. Held-out rows are chosen by session id or MR id, so one session or MR never appears in both `train.jsonl` and `eval.jsonl`. `--anonymize` strips emails and URLs. `manifest.json` counts rows by task, source, and machine and records `chat_template`, `thinking`, and `target_model`.
 
-Each task is also its own dataset. `--task agentic` and `--task style` stay on the 27B defaults above. Review is the set for a separate ~9B review model: `--task review` writes only review SFT and DPO, plus the held-out eval, and defaults to 16384 tokens. Diffs keep `--review-context-lines` (default 20) on each side of the comment instead of the whole hunk. `--chat-template` can be `chatml`, `llama3`, or `gemma` for that smaller model. The messages stay in the OpenAI tool-calling schema; the template name is what Unsloth should apply.
+Each task is also its own dataset. `--task agentic` and `--task style` stay on the 27B defaults above. Review is the set for a separate ~9B review model: `--task review` writes only review SFT and DPO, plus the held-out eval, and defaults to 8192 tokens. Diffs keep `--review-context-lines` (default 20) on each side of the comment instead of the whole hunk. `--chat-template` can be `chatml`, `llama3`, or `gemma` for that smaller model. The messages stay in the OpenAI tool-calling schema; the template name is what Unsloth should apply.
 
 ```bash
 python -m scripts.build_dataset \
@@ -344,31 +344,55 @@ python -m scripts.build_dataset --task agentic --output-dir data/finetune/agenti
 python -m scripts.build_dataset --task style --output-dir data/finetune/style \
   --chat-template qwen3 --thinking strip --max-tokens 32000
 python -m scripts.build_dataset --task review --output-dir data/finetune/review \
-  --chat-template qwen3 --max-tokens 16384 --review-context-lines 20
+  --chat-template qwen3 --max-tokens 8192 --review-context-lines 20
 ```
 
 The same controls are on the **Экспорт** page of `streamlit run viewer/app.py`.
 
-### bf16 LoRA for Qwen3.5
+### This machine
 
-Unsloth's [Qwen3.5 fine-tuning guide](https://unsloth.ai/docs/models/qwen3.5/fine-tune) says not to train Qwen3.5 with QLoRA (4-bit), dense or MoE, because the quantization gap is larger than usual. Use bf16 LoRA instead. Their published training memory is about 22GB for the 9B and about 56GB for the 27B. There is no separate Qwen3.8 training page that recommends 4-bit, so the 27B author model uses this same bf16 LoRA setup. The guide's checkpoint id is `Qwen/Qwen3.5-27B`.
+Local box: two RTX 5060 Ti 16GB cards (Blackwell, `sm_120`), no NVLink, i9-9900K, 80GB RAM. The 9B reviewer can be trained here. The 27B author cannot. Do not train the 27B by offloading layers to that 80GB of system RAM.
 
-The sequence length below is the training budget (32768 for the author, 16384 for the reviewer), not the long context used later in llama.cpp. Set `model_name` and `chat_template` to the pair recorded in `manifest.json` (`base_model` and `chat_template`). Reviewer candidates are `Qwen/Qwen3.5-9B` and `deepreinforce-ai/Ornith-1.0-9B` (MIT; the 9B dense model is a Qwen3.5 hybrid, and the Ornith family also includes Gemma 4 post-trains at larger sizes). Ornith's GGUF uses the Qwen3.5 chat template; pass `--chat-template gemma` only if you actually train a Gemma-based checkpoint.
+| Profile | Model | Where | Method | GPUs | Seq | Unsloth training memory | Fits here? |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `reviewer-qlora-1x16gb` | 9B | local | 4-bit QLoRA | 1x 16GB | 8192 | weights about 6.5GB; training is higher and can fill the card | yes, batch 1, if it does not OOM |
+| `reviewer-bf16-2x16gb` | 9B | local | bf16 LoRA, `device_map="balanced"` | 2x 16GB | 8192 | about 22GB | yes, sharded; neither card may pass 16GB |
+| `author-bf16-1x80gb` | 27B | rented A100 or H100 80GB | bf16 LoRA | 1x 80GB | 32768 | about 56GB | no on the local GPUs |
+
+Unsloth's published bf16 LoRA figures are 22GB (9B) and 56GB (27B). The 6.5GB 9B number is their 4-bit inference size, not a training measurement. 4-bit training of Qwen3.5 is the quality risk described below. Configs are in `configs/train/`.
+
+Blackwell needs a PyTorch build that contains `sm_120` kernels. That is a CUDA 12.8 wheel (`cu128`), PyTorch 2.7 or newer. Wheels built with CUDA 12.6 or older do not include `sm_120` and fail even if the driver is new. Unsloth's [Blackwell guide](https://unsloth.ai/docs/blog/fine-tuning-llms-with-blackwell-rtx-50-series-and-unsloth) says `pip install unsloth` is enough on a current environment, and the CUDA toolkit should be 12.8 or newer. Do not upgrade `triton` by itself; each PyTorch wheel pins the Triton it was built with. If you compile xFormers from source, set `TORCH_CUDA_ARCH_LIST=12.0`.
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+pip install unsloth
+```
+
+### 9B reviewer, on the two 16GB cards
+
+Candidates are `Qwen/Qwen3.5-9B` and `deepreinforce-ai/Ornith-1.0-9B` (MIT). The 9B Ornith checkpoint is a Qwen3.5 hybrid; larger Ornith models are also post-trained on Gemma 4. Use `--chat-template gemma` only for a Gemma-based checkpoint. The review sample budget defaults to 8192 tokens. Raise `--max-tokens` only if the profile still fits.
+
+**One GPU, 4-bit QLoRA** (`configs/train/reviewer-qlora-1x16gb.json`). [Unsloth does not recommend this for Qwen3.5](https://unsloth.ai/docs/models/qwen3.5/fine-tune), dense or MoE, because the quantization gap is larger than usual. It is here only because one 16GB card cannot hold bf16 LoRA. Train with batch size 1, gradient accumulation 8, and `use_gradient_checkpointing="unsloth"`. Before keeping the adapter, serve the base model and the adapter on two ports and compare them on the same held-out MRs:
+
+```bash
+python -m scripts.eval_dataset \
+  --eval data/finetune/review/eval.jsonl \
+  --models configs/train/reviewer-compare.json
+```
+
+Keep the adapter only if precision, recall, and the false-positive rate are not worse than the base model.
+
+**Both GPUs, bf16 LoRA** (`configs/train/reviewer-bf16-2x16gb.json`). This is the quality path. Unsloth shards a model that does not fit on one GPU with `device_map="balanced"` in a single process ([multi-GPU guide](https://unsloth.ai/docs/basics/multi-gpu-training-with-unsloth)). Do not start it with `torchrun` or `accelerate launch`. DDP puts a full copy on every GPU, and a 22GB bf16 LoRA does not fit in 16GB. `device_map="balanced"` is also rejected inside that distributed mode. The cards have no NVLink, so the shard traffic goes over PCIe and training is slower. There is no CPU offload in this profile. If one card runs out of memory, shorten `max_seq_length`.
 
 ```python
-from datasets import load_dataset
-from trl import SFTConfig, SFTTrainer
-from unsloth import FastLanguageModel
-from unsloth.chat_templates import get_chat_template
-
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="Qwen/Qwen3.5-27B",
-    max_seq_length=32768,
+    model_name="Qwen/Qwen3.5-9B",
+    max_seq_length=8192,
     load_in_4bit=False,
     load_in_16bit=True,
     full_finetuning=False,
+    device_map="balanced",
 )
-tokenizer = get_chat_template(tokenizer, chat_template="qwen3")
 model = FastLanguageModel.get_peft_model(
     model,
     r=16,
@@ -378,33 +402,25 @@ model = FastLanguageModel.get_peft_model(
     use_gradient_checkpointing="unsloth",
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
 )
-dataset = load_dataset("json", data_files={"train": "data/finetune/agentic/train.jsonl"})
-
-def formatting(batch):
-    texts = [
-        tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-        for messages in batch["messages"]
-    ]
-    return {"text": texts}
-
-trainer = SFTTrainer(
-    model=model,
-    processing_class=tokenizer,
-    train_dataset=dataset["train"].map(formatting, batched=True),
-    args=SFTConfig(
-        dataset_text_field="text",
-        max_length=32768,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=8,
-        num_train_epochs=1,
-        learning_rate=2e-4,
-        output_dir="outputs/qwen3.5-27b-lora",
-    ),
-)
-trainer.train()
 ```
 
-For the 9B reviewer, use the same bf16 flags with `model_name="Qwen/Qwen3.5-9B"` or `model_name="deepreinforce-ai/Ornith-1.0-9B"` and `max_length=16384`. Do not set `load_in_4bit=True`.
+Use `per_device_train_batch_size=1` and `gradient_accumulation_steps=8`.
+
+### 27B author, on a rented 80GB GPU
+
+Train `Qwen/Qwen3.5-27B` on one rented A100 80GB or H100 80GB with bf16 LoRA (`configs/train/author-bf16-1x80gb.json`). Unsloth's figure for that run is about 56GB, which fits in 80GB and does not fit in 32GB of local GPU memory. Do not split this model onto the two 16GB cards, and do not offload it to the 80GB of system RAM.
+
+```python
+model, tokenizer = FastLanguageModel.from_pretrained(
+    model_name="Qwen/Qwen3.5-27B",
+    max_seq_length=32768,
+    load_in_4bit=False,
+    load_in_16bit=True,
+    full_finetuning=False,
+)
+```
+
+The rest of the LoRA and `SFTTrainer` setup matches the 9B block, with `max_length=32768` and the author JSONL. There is no separate Qwen3.8 training page that recommends 4-bit, so this 27B uses the Qwen3.5 bf16 recipe. After training, download the adapter, merge or convert it to GGUF, and serve that file on the local machine with llama.cpp. The rented GPU is only for the training run.
 
 DPO uses `train_dpo.jsonl` (`prompt`, `chosen`, and `rejected` are message lists) with TRL's `DPOTrainer` and the same template. If the export was built with `--thinking keep`, do not disable thinking at serve time.
 

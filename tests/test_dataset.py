@@ -365,14 +365,14 @@ def test_review_export_is_short_and_template_is_selectable(tmp_path: Path):
     )
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["chat_template"] == "llama3"
-    assert manifest["max_tokens"] == 16384
+    assert manifest["max_tokens"] == 8192
     assert manifest["tasks"] == ["review"]
     assert "<|start_header_id|>system<|end_header_id|>" in manifest["template_preview"]
     rows = [json.loads(line) for line in (out / "train.jsonl").read_text(encoding="utf-8").splitlines()]
     assert rows
     assert {row["task"] for row in rows} == {"review"}
     for row in rows:
-        assert sequence_tokens(row["messages"], 3.0) <= 16384
+        assert sequence_tokens(row["messages"], 3.0) <= 8192
     dpo = (out / "train_dpo.jsonl").read_text(encoding="utf-8").strip()
     assert dpo
     rendered = render_chat([{"role": "user", "content": "hi"}], "gemma")
@@ -452,6 +452,26 @@ def test_review_context_source_model_and_author_metrics():
     assert compared["models"]["qwen3.5-9b"]["recall"] == 1.0
     assert compared["models"]["ornith-1.0-9b"]["recall"] == 0.0
     assert compared["models"]["ornith-1.0-9b"]["false_positive_rate"] == 0.0
+
+
+def test_hardware_profiles_match_the_two_machines():
+    root = Path(__file__).resolve().parents[1] / "configs" / "train"
+    qlora = json.loads((root / "reviewer-qlora-1x16gb.json").read_text(encoding="utf-8"))
+    sharded = json.loads((root / "reviewer-bf16-2x16gb.json").read_text(encoding="utf-8"))
+    author = json.loads((root / "author-bf16-1x80gb.json").read_text(encoding="utf-8"))
+    assert qlora["training"]["load_in_4bit"] is True
+    assert qlora["hardware"]["gpu_count"] == 1
+    assert qlora["dataset"]["max_tokens"] == 8192
+    assert any("QLoRA" in line or "4-bit" in line for line in qlora["warnings"])
+    assert sharded["training"]["load_in_16bit"] is True
+    assert sharded["training"]["device_map"] == "balanced"
+    assert sharded["training"]["cpu_offload"] is False
+    assert sharded["hardware"]["nvlink"] is False
+    assert author["training"]["load_in_4bit"] is False
+    assert author["training"]["cpu_offload"] is False
+    assert author["hardware"]["machine"] == "rented"
+    assert "Qwen/Qwen3.5-9B" in qlora["base_model_candidates"]
+    assert "deepreinforce-ai/Ornith-1.0-9B" in qlora["base_model_candidates"]
 
 
 def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Path):

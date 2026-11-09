@@ -87,7 +87,7 @@ def render() -> None:
     base_default = "Qwen/Qwen3.5-9B" if dataset_task == "review" else "Qwen/Qwen3.5-27B"
     base_model = st.text_input("Base model", value=base_default, key=f"finetune_base_{dataset_task}")
     output_dir = st.text_input("Output dir", value=f"data/finetune/{dataset_task}", key=f"finetune_dir_{dataset_task}")
-    token_default = 16384 if dataset_task == "review" else 32000
+    token_default = 8192 if dataset_task == "review" else 32000
     max_tokens = st.number_input(
         "Макс. токенов",
         min_value=256,

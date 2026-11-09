@@ -1,0 +1,41 @@
+{
+  "profile": "reviewer-qlora-1x16gb",
+  "target": "reviewer",
+  "base_model": "Qwen/Qwen3.5-9B",
+  "base_model_candidates": [
+    "Qwen/Qwen3.5-9B",
+    "deepreinforce-ai/Ornith-1.0-9B"
+  ],
+  "chat_template": "qwen3",
+  "hardware": {
+    "machine": "local",
+    "gpus": ["RTX 5060 Ti 16GB"],
+    "gpu_count": 1,
+    "nvlink": false,
+    "system_ram_gb": 80
+  },
+  "training": {
+    "precision": "qlora-4bit",
+    "load_in_4bit": true,
+    "load_in_16bit": false,
+    "full_finetuning": false,
+    "device_map": null,
+    "cpu_offload": false,
+    "max_seq_length": 8192,
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "gradient_checkpointing": "unsloth",
+    "learning_rate": 0.0002,
+    "lora_r": 16,
+    "lora_alpha": 16
+  },
+  "dataset": {
+    "task": "review",
+    "max_tokens": 8192,
+    "review_context_lines": 20
+  },
+  "warnings": [
+    "Unsloth does not recommend 4-bit QLoRA for Qwen3.5: the quantization gap is larger than usual. This profile exists only so a 9B reviewer can train on one 16GB RTX 5060 Ti.",
+    "Before keeping the adapter, compare it with the untouched base model on the same held-out MR set: python -m scripts.eval_dataset --eval data/finetune/review/eval.jsonl --models configs/train/reviewer-compare.json"
+  ]
+}
