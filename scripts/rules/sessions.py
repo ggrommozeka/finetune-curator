@@ -56,6 +56,49 @@ def load_review_decisions(path: Path) -> dict:
     return {"labels": labels, "notes": notes}
 
 
+def source_model_info(record: dict) -> dict:
+    """Provider and model that produced a session, from the record or its messages."""
+    provider = ""
+    name = ""
+    model = record.get("model")
+    if isinstance(model, dict):
+        provider = str(model.get("providerID") or model.get("provider") or model.get("provider_id") or "")
+        name = str(model.get("modelID") or model.get("model_id") or model.get("id") or model.get("name") or "")
+    elif isinstance(model, str) and model.strip():
+        text = model.strip()
+        if "/" in text:
+            provider, name = text.split("/", 1)
+        else:
+            name = text
+    if not provider:
+        provider = str(record.get("provider") or record.get("providerID") or record.get("provider_id") or "")
+    if not name:
+        name = str(record.get("model_id") or record.get("modelID") or "")
+    blobs = []
+    for key in ("info", "metadata"):
+        blob = record.get(key)
+        if isinstance(blob, dict):
+            blobs.append(blob)
+    for message in record.get("messages") or []:
+        if isinstance(message, dict):
+            blobs.append(message)
+            if isinstance(message.get("info"), dict):
+                blobs.append(message["info"])
+    for blob in blobs:
+        nested = blob.get("model")
+        if isinstance(nested, dict):
+            provider = provider or str(nested.get("providerID") or nested.get("provider") or "")
+            name = name or str(nested.get("modelID") or nested.get("id") or nested.get("name") or "")
+        elif isinstance(nested, str) and "/" in nested and not (provider and name):
+            provider, name = nested.split("/", 1)
+        elif isinstance(nested, str) and not name:
+            name = nested
+        provider = provider or str(blob.get("providerID") or blob.get("provider") or "")
+        name = name or str(blob.get("modelID") or blob.get("model_id") or "")
+    label = "/".join(part for part in (provider.strip(), name.strip()) if part)
+    return {"provider": provider.strip(), "model": name.strip(), "label": label}
+
+
 def session_id(rec: dict) -> str:
     return str(
         rec.get("id")

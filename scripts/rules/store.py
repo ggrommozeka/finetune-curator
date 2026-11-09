@@ -58,7 +58,16 @@ def load_proposals(path: Path) -> dict:
         data = {"proposals": data}
     if not isinstance(data, dict):
         raise ValueError(f"{path} must be a JSON object")
-    data["proposals"] = [normalize_proposal(item) for item in _raw_items(data) if isinstance(item, dict) and item.get("id")]
+    document_mode = str(data.get("mode") or "")
+    proposals = []
+    for item in _raw_items(data):
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        proposal = normalize_proposal(item)
+        if not proposal["mode"] and document_mode == "per-session":
+            proposal["mode"] = "per-session"
+        proposals.append(proposal)
+    data["proposals"] = proposals
     data["rules"] = [item for item in data["proposals"] if item["kind"] == "rule"]
     data.setdefault("version", 2)
     return data

@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 
 from scripts.patterns.store import PatternStore
-from scripts.rules.sessions import normalize_messages, session_id
+from scripts.rules.sessions import normalize_messages, session_id, source_model_info
 
 
 def content_hash(messages: list) -> str:
@@ -62,39 +62,175 @@ def _text(value) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _json_obj(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _tool_call(payload: dict) -> dict | None:
+    kind = str(payload.get("type") or "").lower().replace("_", "-")
+    name = payload.get("tool") or payload.get("name") or ""
+    function = payload.get("function") if isinstance(payload.get("function"), dict) else {}
+    name = name or function.get("name") or ""
+    if kind not in {"tool", "tool-call", "tool-use"} and not name:
+        return None
+    state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+    arguments = payload.get("input")
+    if arguments is None:
+        arguments = payload.get("arguments") or function.get("arguments") or state.get("input") or state.get("args") or {}
+    if not isinstance(arguments, str):
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    call_id = str(payload.get("callID") or payload.get("call_id") or payload.get("id") or name or "call")
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": str(name or "tool"), "arguments": arguments},
+    }
+
+
+def _tool_output(payload: dict) -> str:
+    state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+    output = payload.get("output")
+    if output is None:
+        output = state.get("output") if state.get("output") is not None else state.get("result")
+    if output is None:
+        output = payload.get("content") or ""
+    return _text(output)
+
+
+def _turns_from_parts(parts: list[dict], default_role: str = "assistant") -> list[dict]:
+    """Rebuild chat turns, including tool calls and tool results, from typed parts."""
+    messages: list[dict] = []
+    current: dict | None = None
+
+    def flush() -> None:
+        nonlocal current
+        if current is None:
+            return
+        if current.get("content") or current.get("tool_calls"):
+            messages.append(current)
+        current = None
+
+    for payload in parts:
+        kind = str(payload.get("type") or "").lower().replace("_", "-")
+        role = str(payload.get("role") or default_role or "assistant")
+        if kind in {"tool-result", "tool-output"} or role == "tool":
+            flush()
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": str(payload.get("callID") or payload.get("call_id") or payload.get("tool_call_id") or ""),
+                    "content": _tool_output(payload),
+                }
+            )
+            continue
+        call = _tool_call(payload)
+        if call and kind in {"tool", "tool-call", "tool-use"}:
+            if current is None or current.get("role") != "assistant":
+                flush()
+                current = {"role": "assistant", "content": ""}
+            current.setdefault("tool_calls", []).append(call)
+            if kind == "tool" and (payload.get("output") is not None or payload.get("state")):
+                output = _tool_output(payload)
+                flush()
+                if output:
+                    messages.append({"role": "tool", "tool_call_id": call["id"], "content": output})
+            continue
+        text = payload.get("text") if payload.get("text") is not None else payload.get("content") or ""
+        if current is not None and current.get("role") != role:
+            flush()
+        if current is None:
+            current = {"role": role, "content": ""}
+        if text:
+            piece = _text(text)
+            current["content"] = piece if not current.get("content") else current["content"] + "\n" + piece
+    flush()
+    return messages
+
+
+def _part_payloads(conn: sqlite3.Connection, session_id_value: str, message_id: str | None = None) -> list[dict]:
+    part_cols = _table_columns(conn, "part")
+    if not part_cols or "data" not in part_cols:
+        return []
+    order = "time_created, id" if "time_created" in part_cols and "id" in part_cols else "id" if "id" in part_cols else "rowid"
+    if message_id is not None and "message_id" in part_cols:
+        query = f"SELECT data FROM part WHERE message_id = ? ORDER BY {order}"
+        rows = conn.execute(query, (message_id,)).fetchall()
+    elif "session_id" in part_cols:
+        query = f"SELECT data FROM part WHERE session_id = ? ORDER BY {order}"
+        rows = conn.execute(query, (session_id_value,)).fetchall()
+    else:
+        return []
+    payloads = []
+    for row in rows:
+        payload = _json_obj(row["data"])
+        if payload:
+            payloads.append(payload)
+    return payloads
+
+
+def _attach_model(record: dict, session=None) -> dict:
+    if session is not None and "model" in session.keys() and session["model"]:
+        record["model"] = _json_obj(session["model"]) or session["model"]
+    info = source_model_info(record)
+    if info["label"]:
+        record["source_model"] = info["label"]
+        record["source_provider"] = info["provider"]
+        if not isinstance(record.get("model"), (dict, str)):
+            record["model"] = {"providerID": info["provider"], "modelID": info["model"]}
+    return record
+
+
 def _rows_from_v2(conn: sqlite3.Connection) -> list[dict]:
     session_cols = _table_columns(conn, "session")
+    message_cols = _table_columns(conn, "message")
     title_col = "title" if "title" in session_cols else None
     created_col = next((name for name in ("time_created", "created_at", "time_updated") if name in session_cols), None)
     project_col = next((name for name in ("project_id", "directory", "slug") if name in session_cols), None)
     sessions = conn.execute("SELECT * FROM session").fetchall()
     records = []
     for session in sessions:
-        keys = session.keys()
         sid = session["id"]
-        parts = conn.execute(
-            "SELECT data FROM part WHERE session_id = ? ORDER BY time_created, id" if "time_created" in _table_columns(conn, "part") else "SELECT data FROM part WHERE session_id = ? ORDER BY id",
-            (sid,),
-        ).fetchall()
-        messages = []
-        for part in parts:
-            try:
-                payload = json.loads(part["data"])
-            except (TypeError, json.JSONDecodeError):
-                continue
-            role = payload.get("role") or payload.get("type") or "assistant"
-            content = payload.get("text") or payload.get("content") or payload.get("output") or ""
-            if content:
-                messages.append({"role": str(role), "content": _text(content)})
-        records.append(
-            {
-                "id": str(sid),
-                "title": session[title_col] if title_col else "",
-                "project": str(session[project_col]) if project_col else "",
-                "created_at": str(session[created_col]) if created_col else "",
-                "messages": messages,
-            }
-        )
+        messages: list[dict] = []
+        if message_cols and "session_id" in message_cols:
+            order = "time_created, id" if "time_created" in message_cols else "id"
+            rows = conn.execute(
+                f"SELECT * FROM message WHERE session_id = ? ORDER BY {order}",
+                (sid,),
+            ).fetchall()
+            for row in rows:
+                data = _json_obj(row["data"]) if "data" in row.keys() else {}
+                role = str(data.get("role") or (row["role"] if "role" in row.keys() else "") or "assistant")
+                payloads = _part_payloads(conn, str(sid), str(row["id"]) if "id" in row.keys() else None)
+                if not payloads and "message_id" not in _table_columns(conn, "part"):
+                    payloads = []
+                turns = _turns_from_parts(payloads, default_role=role)
+                if not turns and (data.get("content") or data.get("text")):
+                    turns = [{"role": role, "content": _text(data.get("content") or data.get("text"))}]
+                for turn in turns:
+                    if turn.get("role") != "tool" and not any(part.get("role") for part in payloads):
+                        turn["role"] = role
+                    model = data.get("model") or (row["model"] if "model" in row.keys() else None)
+                    if model and "model" not in turn:
+                        turn["model"] = model
+                messages.extend(turns)
+        if not messages:
+            messages = _turns_from_parts(_part_payloads(conn, str(sid)))
+        record = {
+            "id": str(sid),
+            "title": session[title_col] if title_col else "",
+            "project": str(session[project_col]) if project_col else "",
+            "created_at": str(session[created_col]) if created_col else "",
+            "messages": messages,
+        }
+        records.append(_attach_model(record, session))
     return records
 
 
@@ -105,10 +241,23 @@ def _rows_from_v1(conn: sqlite3.Connection) -> list[dict]:
     buckets: dict[str, list] = {}
     for row in conn.execute(f"SELECT * FROM message ORDER BY {order}"):
         sid = str(row[session_key])
-        buckets.setdefault(sid, []).append(
-            {"role": row["role"] or "user", "content": _text(row["content"])}
-        )
-    return [{"id": sid, "title": "", "project": "", "created_at": "", "messages": msgs} for sid, msgs in buckets.items()]
+        message = {"role": row["role"] or "user", "content": _text(row["content"])}
+        if "model" in row.keys() and row["model"]:
+            message["model"] = row["model"]
+        calls = row["tool_calls"] if "tool_calls" in row.keys() else None
+        if calls:
+            if isinstance(calls, str):
+                try:
+                    message["tool_calls"] = json.loads(calls)
+                except json.JSONDecodeError:
+                    message["tool_calls"] = []
+            else:
+                message["tool_calls"] = calls
+        buckets.setdefault(sid, []).append(message)
+    records = []
+    for sid, msgs in buckets.items():
+        records.append(_attach_model({"id": sid, "title": "", "project": "", "created_at": "", "messages": msgs}))
+    return records
 
 
 def _rows_from_blob(conn: sqlite3.Connection) -> list[dict]:
@@ -119,15 +268,14 @@ def _rows_from_blob(conn: sqlite3.Connection) -> list[dict]:
             messages = json.loads(raw) if isinstance(raw, str) else raw
         except json.JSONDecodeError:
             messages = []
-        records.append(
-            {
-                "id": str(row["id"]),
-                "title": row["title"] if "title" in row.keys() else "",
-                "project": "",
-                "created_at": "",
-                "messages": messages or [],
-            }
-        )
+        record = {
+            "id": str(row["id"]),
+            "title": row["title"] if "title" in row.keys() else "",
+            "project": "",
+            "created_at": "",
+            "messages": messages or [],
+        }
+        records.append(_attach_model(record, row))
     return records
 
 
@@ -165,6 +313,7 @@ def _record_from_export(row: dict) -> dict:
         "created_at": str(row.get("created_at") or row.get("time_created") or ""),
         "score": row.get("score"),
         "label": row.get("label") or "",
+        "machine": row.get("machine") or "",
         "messages": messages,
         "message_count": len(messages),
     }
@@ -187,6 +336,9 @@ def ingest_records(
             skipped += 1
             continue
         messages = record.get("messages") or []
+        if not record.get("machine"):
+            record["machine"] = source_label
+        record = _attach_model(record)
         digest = content_hash(messages)
         gid = global_id(digest)
         existed = store.find_by_hash(digest) is not None

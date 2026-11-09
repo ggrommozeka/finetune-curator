@@ -250,6 +250,85 @@ def test_cluster_threshold_and_recommendation_kind(tmp_path: Path):
     store.close()
 
 
+def test_v2_parts_keep_tools_and_model_comes_from_messages(tmp_path: Path):
+    store = PatternStore(tmp_path / "patterns")
+    path = tmp_path / "v2.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE session (id TEXT, title TEXT, time_created TEXT)")
+    conn.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created TEXT, data TEXT)")
+    conn.execute(
+        "CREATE TABLE part (id TEXT, session_id TEXT, message_id TEXT, time_created TEXT, data TEXT)"
+    )
+    conn.execute("INSERT INTO session VALUES ('s1', 'Tools', '2024-04-01T00:00:00Z')")
+    conn.execute(
+        "INSERT INTO message VALUES ('m1', 's1', '2024-04-01T00:00:01Z', ?)",
+        (json.dumps({"role": "user"}),),
+    )
+    conn.execute(
+        "INSERT INTO message VALUES ('m2', 's1', '2024-04-01T00:00:02Z', ?)",
+        (json.dumps({"role": "assistant", "model": {"providerID": "llama", "modelID": "qwen3"}}),),
+    )
+    conn.execute(
+        "INSERT INTO part VALUES ('p1', 's1', 'm1', '2024-04-01T00:00:01Z', ?)",
+        (json.dumps({"type": "text", "text": "read the file"}),),
+    )
+    conn.execute(
+        "INSERT INTO part VALUES ('p2', 's1', 'm2', '2024-04-01T00:00:02Z', ?)",
+        (json.dumps({"type": "tool-call", "tool": "read", "callID": "c1", "input": {"path": "a.py"}}),),
+    )
+    conn.execute(
+        "INSERT INTO part VALUES ('p3', 's1', 'm2', '2024-04-01T00:00:03Z', ?)",
+        (json.dumps({"type": "tool-result", "callID": "c1", "output": "print(1)"}),),
+    )
+    conn.commit()
+    conn.close()
+    stats = import_path(store, path, source_label="desktop")
+    assert stats["added"] == 1
+    session = store.sessions()[0]
+    roles = [message["role"] for message in session["messages"]]
+    assert roles == ["user", "assistant", "tool"]
+    assistant = session["messages"][1]
+    assert assistant["tool_calls"][0]["function"]["name"] == "read"
+    assert "a.py" in assistant["tool_calls"][0]["function"]["arguments"]
+    assert session["messages"][2]["content"] == "print(1)"
+    assert session["source_model"] == "llama/qwen3"
+    assert session["source_provider"] == "llama"
+    store.close()
+
+
+def test_machine_on_the_row_does_not_need_the_pattern_label(tmp_path: Path):
+    store = PatternStore(tmp_path / "patterns")
+    path = tmp_path / "scored.jsonl"
+    row = _session("m1", "keep the score", "2024-05-01T00:00:00+00:00", score=0.77)
+    row["machine"] = "laptop-a"
+    _jsonl(path, [row])
+    import_path(store, path, source_label="bundle")
+    session = store.sessions()[0]
+    assert session["machine"] == "laptop-a"
+    assert session["score"] == 0.77
+    assert session["sources"] == ["bundle"]
+    store.close()
+
+
+def test_empty_proposal_mode_inherits_per_session_document(tmp_path: Path):
+    from scripts.rules.store import load_proposals, save_proposals, upsert_proposals
+
+    path = tmp_path / "rule_proposals.json"
+    save_proposals(
+        path,
+        {
+            "version": 2,
+            "mode": "per-session",
+            "proposals": [{"id": "old", "text": "draft", "category": "other", "kind": "rule"}],
+        },
+    )
+    loaded = load_proposals(path)
+    assert loaded["proposals"][0]["mode"] == "per-session"
+    upsert_proposals(path, [{"id": "new", "text": "corpus rule", "category": "other", "kind": "rule", "mode": "corpus"}], mode="corpus", drop_modes={"per-session"})
+    kept = load_proposals(path)["proposals"]
+    assert [item["id"] for item in kept] == ["new"]
+
+
 def test_export_report_and_rollback(tmp_path: Path):
     from scripts.mine_patterns import main
 
