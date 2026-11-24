@@ -22,9 +22,9 @@ install_config()
 
 pages = [
     st.Page("pages/sessions.py", title="Сессии", default=True),
+    st.Page("pages/gitlab.py", title="GitLab"),
     st.Page("pages/proposals.py", title="Правила"),
     st.Page("pages/export_page.py", title="Экспорт"),
 ]
-# Later branches append pages (GitLab, monitoring) by editing this list.
 navigation = st.navigation(pages)
 navigation.run()

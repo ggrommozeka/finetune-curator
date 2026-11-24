@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.export_approved import main as export_sessions
+from scripts.export_gitlab_mrr import main as export_gitlab
 from scripts.export_rules import main as export_rules
 from shared import widget_value
 
@@ -34,7 +35,9 @@ def render() -> None:
     markdown = st.text_input("Rules Markdown", value="data/approved_rules.md")
     payload = st.text_input("Rules JSON", value="data/approved_rules.json")
     skills = st.text_input("Skills dir", value="skills")
-    st.caption("GitLab JSONL добавляется на странице GitLab, когда этот источник подключён, и попадает в тот же approved-файл через export_gitlab_mrr.")
+    gitlab_store = st.text_input("GitLab store", value=st.session_state.get("cfg_gitlab", "data/gitlab"))
+    gitlab_sft = st.text_input("GitLab SFT", value="data/gitlab_sft.jsonl")
+    gitlab_dpo = st.text_input("GitLab DPO", value="data/gitlab_dpo.jsonl")
     if st.button("Экспорт сессий", type="primary"):
         try:
             export_sessions(["--input", input_path, "--decisions", decisions, "--output", approved])
@@ -62,6 +65,13 @@ def render() -> None:
             st.error(str(exc))
         else:
             st.success(f"{markdown} · {payload} · {skills}")
+    if st.button("Экспорт GitLab (kept)"):
+        try:
+            export_gitlab(["export", "--store", gitlab_store, "--sft", gitlab_sft, "--dpo", gitlab_dpo, "--status", "keep"])
+        except SystemExit as exc:
+            st.error(str(exc) or "export failed")
+        else:
+            st.success(f"{gitlab_sft} · {gitlab_dpo}")
 
 
 render()

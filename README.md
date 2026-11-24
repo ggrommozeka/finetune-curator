@@ -58,12 +58,17 @@ flowchart TD
 
 Источники LogMiner: OpenCode, Claude Code, Cline, Codex, Qwen.
 
+Источники: OpenCode и слитые merge request GitLab.
+
 1. **Выгрузка** — тонкая обёртка над [LogMiner](https://github.com/pearsonkyle/LogMiner).
-2. **Одно приложение Streamlit** — `streamlit run viewer/app.py`. Общие пути: сессии OpenCode, предложения правил и навыков, экспорт. Страницы GitLab и мониторинга подключаются следующими изменениями.
+2. **Одно приложение Streamlit** — `streamlit run viewer/app.py`. Общие пути: сессии OpenCode, MR GitLab, предложения, экспорт.
 3. **Экспорт одобренных сессий** — JSONL только с Keep, для Unsloth.
-4. **Предложения** — один список (`kind`: rule или skill, текст, сессии-источники, статус, `mode`). Сейчас режим `per-session`. Позже корпус пишет в тот же файл и ту же страницу одобрения.
+4. **Предложения** — один список (`kind`: rule или skill). Правила с сессий и из комментариев GitLab пишутся в один файл.
+5. **Ревью GitLab** — слитые MR становятся примерами SFT и DPO. Связанный комментарий можно предложить как правило.
 
 Старый файл `{"rules":[...]}` без поля `mode` читается как черновики `per-session`. Предложение с `source: gitlab` так не помечается. Одобренное предложение не удаляется, когда корпус вычищает черновики.
+
+Файлы правил — отдельный результат, не вместо датасета сессий.
 
 ## Установка
 
@@ -235,6 +240,92 @@ export FINETUNE_CURATOR_MODEL=qwen3-27b-q5
 
 `--print-endpoint` показывает модель и адрес и не печатает ключ.
 
+## Ревью merge request в GitLab
+
+История ревью компании остаётся на диске. Фаза 1 ходит в GitLab. Фаза 2 — нет.
+
+**Фаза 1 — sync.** Слитые MR (описание, обсуждения с якорями, коммиты, диффы, текст файлов на коммите и на родителе) попадают в `data/gitlab/` (SQLite и сырой JSON, в gitignore). Повторный запуск пропускает уже сохранённые MR. `--refresh project!iid` перекачивает один MR. Токен — `GITLAB_TOKEN`, в лог и в склад он не пишется.
+
+```bash
+export GITLAB_TOKEN=...   # scope api. Не коммитьте токен.
+python -m scripts.export_gitlab_mrr sync \
+  --base-url https://gitlab.company.internal \
+  --ca-bundle /path/to/company-ca.pem \
+  --group my-group \
+  --since 2025-01-01 \
+  --until 2026-01-01
+
+# позже забираются только новые MR
+python -m scripts.export_gitlab_mrr sync \
+  --base-url https://gitlab.company.internal \
+  --group my-group
+
+# перекачать один MR
+python -m scripts.export_gitlab_mrr sync \
+  --base-url https://gitlab.company.internal \
+  --refresh group/app!42
+```
+
+`--project group/app` можно повторять. Вложенные группы не обрезаются: `https://gitlab.example.com/group/nested/app/-/merge_requests/7` хранится и обновляется как `group/nested/app!7`. `--insecure` отключает проверку TLS. Связанные задачи читаются из заголовка и описания, в том числе `group/project#123` и полный URL `grp/sub/proj/-/issues/5`. Ошибка запроса задачи пишется в лог, sync продолжается. Текст задачи лежит в SQLite и в `issues.json`.
+
+Комментарии всех ревьюеров сохраняются, с ролью автора на MR (author, reviewer, assignee, commenter). `--reviewer` только фильтрует список и страницу, обработку он не сужает.
+
+У комментария есть якорь: SHA `base` / `start` / `head`, путь, старый и новый диапазон строк, фрагмент. Связь «комментарий, потом правка» — более поздний коммит, который задел эти строки. Коммиты тимлида и коммиты с заголовком MRR в эту связь не входят: это полировка, не исправление комментария. Заголовок сам по себе коммит с комментарием не связывает. Тред помнит, закрыт ли он, кем и какие были ответы. Статус: `linked`, `addressed_elsewhere`, `not_addressed`, `unclear`.
+
+Тимлид один. `gitlab.json` называет его один раз и перечисляет псевдонимы (`team_lead.aliases`: username, имя, почта). `--team-lead` добавляет ещё один псевдоним того же человека. Каждый его коммит становится парой до/после. Регулярное выражение `mrr_pattern` (по умолчанию `\bmrr\b`) помечает полировку. Роли коммита: `author`, `author_fix`, `team_lead_mrr`, `team_lead_other`, `other`.
+
+**Фаза 2 — обработка офлайн.** MR выбираются на странице **GitLab** (`streamlit run viewer/app.py`: проект, автор, ревьюер, даты, связанные комментарии, число комментариев) или в CLI. `--reviewer` и `--linked-only` фильтруют только список. Обработка пишет всех ревьюеров. `--linked-only` оставляет MR, у которых уже есть комментарий, связанный с поздним коммитом; это не счётчик MRR-коммитов тимлида. Страница MR — один таймлайн коммитов и комментариев. Коммиты тимлида подсвечены, заголовки MRR помечены, у ханка есть вид до/после. Ручная связь хранится отдельно и перекрывает автоматическую. Скопируйте `gitlab.example.json` в `gitlab.json`. Связанный комментарий — самый ранний поздний коммит на тех же строках (уверенность 0.8, или 0.9 если тред закрыт). Тот же файл без пересечения строк — `addressed_elsewhere` (0.55).
+
+Примеры и правки Keep/Discard лежат отдельно от сырого MR, поэтому обработку можно повторить без сети. `--anonymize` заменяет имена и почты в примерах. `--anonymize-urls` ещё и URL. Сырой склад не меняется.
+
+```bash
+python -m scripts.export_gitlab_mrr list --linked-only
+
+python -m scripts.export_gitlab_mrr process \
+  --mr group/app!42 --mr group/app!43 \
+  --team-lead team.lead \
+  --anonymize --anonymize-urls
+
+python -m scripts.export_gitlab_mrr process --all
+```
+
+В интерфейсе откройте MR (описание, комментарии, диффы), оставьте или отбросьте пример и поправьте учебный текст. Решение переживает повторную обработку того же MR.
+
+Экспорт пишет строки `keep`, если не передан `--status`. SFT — JSONL `messages` для Unsloth. DPO — `prompt` / `chosen` / `rejected` (rejected — код до правки).
+
+```bash
+python -m scripts.export_gitlab_mrr export \
+  --status keep \
+  --sft data/gitlab_sft.jsonl \
+  --dpo data/gitlab_dpo.jsonl
+```
+
+Необязательное предложение правил идёт тем же LLM, что и правила сессий, и в GitLab не ходит. Такие предложения получают `source: gitlab` и не помечаются `per-session`. `--mock-response` полностью обходится без сети:
+
+```bash
+python -m scripts.export_gitlab_mrr process \
+  --mr group/app!42 \
+  --rules \
+  --mock-response tests/fixtures/sample_rules_response.txt
+```
+
+Одобряйте их на странице **Правила**. `gitlab_review` не входит в источники сессий по умолчанию.
+
+Проверка обеих фаз на записанной фикстуре:
+
+```bash
+GITLAB_TOKEN=example python -m scripts.export_gitlab_mrr sync \
+  --base-url https://gitlab.example.com \
+  --project group/app \
+  --fixture tests/fixtures/gitlab_api.json \
+  --store /tmp/gitlab-store
+
+python -m scripts.export_gitlab_mrr process \
+  --store /tmp/gitlab-store \
+  --mr group/app!7 \
+  --anonymize
+```
+
 ## Каталог файлов
 
 ```
@@ -246,10 +337,12 @@ finetune-curator/
 │   ├── export_opencode.py    # обёртка LogMiner
 │   ├── export_approved.py    # JSONL только Keep
 │   ├── propose_rules.py      # предложения правил
-│   ├── export_rules.py       # одобренные правила → Markdown + JSON
-│   └── rules/                # отбор, слияние, адрес модели, экспорт
+│   ├── export_rules.py       # одобренные правила
+│   ├── export_gitlab_mrr.py  # sync, обработка, экспорт GitLab
+│   ├── rules/                # отбор, слияние, адрес модели
+│   └── gitlab/               # клиент, склад, связь, анонимизация
 ├── viewer/
-│   └── app.py                # одно приложение Streamlit
+│   └── app.py                # одно приложение: сессии, GitLab, правила, экспорт
 ├── tests/
 └── data/                     # только локально
 ```
@@ -260,7 +353,7 @@ finetune-curator/
 python -m pytest
 ```
 
-Покрыты слияние правил, JSON вместе с тегами рассуждения, нарезка длинных сессий, файлы решений, оба экспорта, разбор конфига OpenCode и цепочка `propose_rules` → `export_rules` на canned-ответе. Живая модель не вызывается.
+Покрыты слияние правил, JSON вместе с тегами рассуждения, нарезка длинных сессий, файлы решений, оба экспорта, разбор конфига OpenCode, цепочка `propose_rules` → `export_rules` и экспорт GitLab по записанной фикстуре. Живые модель и GitLab не вызываются.
 
 ## Заметки
 

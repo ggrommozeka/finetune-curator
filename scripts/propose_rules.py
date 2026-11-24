@@ -30,14 +30,14 @@ from scripts.rules.store import save_proposals
 
 def _parse_sources(value: str) -> tuple[str, ...]:
     sources = tuple(part.strip().lower() for part in value.split(",") if part.strip())
-    known = {"discarded", "low-score", "notes"}
+    known = {"discarded", "low-score", "notes", "gitlab_review"}
     unknown = [item for item in sources if item not in known]
     if unknown:
         raise SystemExit(
-            f"Unknown --sources {unknown}. Use discarded, low-score, notes."
+            f"Unknown --sources {unknown}. Use discarded, low-score, notes, gitlab_review."
         )
     if not sources:
-        raise SystemExit("--sources must list at least one of: discarded, low-score, notes")
+        raise SystemExit("--sources must list at least one of: discarded, low-score, notes, gitlab_review")
     return sources
 
 
@@ -144,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sources",
         default="discarded,low-score,notes",
-        help="Comma-separated: discarded, low-score, notes (default: all three)",
+        help="Comma-separated: discarded, low-score, notes, gitlab_review (default: the first three)",
     )
     parser.add_argument(
         "--max-sessions",
