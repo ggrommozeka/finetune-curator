@@ -96,13 +96,9 @@ class Catalog:
                 project_id = None
                 iid = None
                 # Traces do not always repeat project ids; look them up from notes.
-                row = store._conn.execute(
-                    "SELECT project_id, mr_iid FROM notes WHERE note_id = ?",
-                    (note_id,),
-                ).fetchone()
-                if row is not None:
-                    project_id = int(row["project_id"])
-                    iid = int(row["mr_iid"])
+                located = store.note_mr(note_id)
+                if located is not None:
+                    project_id, iid = located
                 return SourceItem(
                     source="gitlab",
                     item_id=f"gitlab-{note_id}",

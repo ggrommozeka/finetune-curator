@@ -9,7 +9,7 @@ from scripts.analysis.cluster import cluster_annotations
 from scripts.analysis.import_sources import import_gitlab_traces, import_path
 from scripts.analysis.monitor import report, rollback
 from scripts.analysis.recommend import recommend_cluster
-from scripts.analysis.skills import skill_id
+from scripts.proposals.skills import skill_id
 from scripts.analysis.store import PatternStore
 from scripts.llm.parsing import extract_json
 

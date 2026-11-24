@@ -202,7 +202,8 @@ python -m scripts.propose_rules --list-models --base-url http://127.0.0.1:8080/v
 ```bash
 python -m scripts.export_opencode \
   --output data/raw_scored.jsonl \
-  --min-score 0.0
+  --min-score 0.0 \
+  --machine laptop-a
 ```
 
 Каталог по умолчанию — `~/.local/share/opencode`. Другой путь: `--input`. `--min-score 0` оставляет все оценки для ручного просмотра. Другие источники LogMiner: `--source claude|cline|codex|qwen`.
@@ -391,7 +392,7 @@ python -m scripts.mine_patterns export \
 
 - **agentic.** Сессии Keep и неразмеченные с оценкой не ниже `--min-score` (0.6). Многоходовой диалог с вызовами инструментов. Поздняя реплика пользователя считается правкой: из SFT выпадает отвергнутый шаг, в DPO он становится `rejected`, а следующий ответ ассистента — `chosen`.
 - **style.** Коммиты тимлида (и MRR, и остальные) и пары «комментарий, потом правка». Вход — «перепиши по правилам проекта». Код до правки — `rejected`, после — `chosen`.
-- **review.** Ханк и комментарий любого ревьюера, плюс правка, если комментарий связан. Ханки без комментариев — негативные примеры, цель ровно `No issues.`
+- **review.** Комментарий ревьюера (не ответ автора MR) и собранный контекст. Блок «Suggested fix» добавляется только к статусу `linked`. `addressed_elsewhere` остаётся комментарием без этого блока. Негативные примеры — ханки итогового диффа, которые прошли ревью без замечаний, а не коммиты правки и не коммиты тимлида. Цель негатива ровно `No issues.`
 
 `--task author` — это agentic и style для модели A. `--task review` — только модель B. Запуск без `--task` и без `--profile` пишет два каталога, `author/` и `review/`. Эти наборы не смешиваются: `--task all` делает то же разделение, а не один общий файл.
 
@@ -399,7 +400,7 @@ python -m scripts.mine_patterns export \
 
 Модель B по умолчанию укладывает контекст в 8192 токена. Приоритет, сверху вниз: дифф, текст MR, связанные задачи, функция на базовом коммите, определения и места вызова, одобренные правила. Не влезший раздел, кроме диффа, выбрасывается. Дифф подрезается. Вокруг комментария остаётся `--review-context-lines` строк (20).
 
-Шаблоны `--chat-template`: `qwen3` (по умолчанию), `qwen3.5`, `chatml`, `llama3`, `gemma`. Для Qwen3 и Qwen3.5 сообщения — ChatML и вызовы `<tool_call>`. `gemma` имеет смысл для чекпоинта на базе Gemma, не для 9B Ornith: 9B Ornith — гибрид Qwen3.5, более крупные Ornith дополнительно дообучены на Gemma 4.
+Шаблоны `--chat-template`: для автора по умолчанию `qwen3.8` (тот же ChatML и `<tool_call>`, что у `qwen3`), для ревьюера по умолчанию `qwen3`. Ещё есть `qwen3.5`, `chatml`, `llama3`, `gemma`. `gemma` имеет смысл для чекпоинта на базе Gemma, не для 9B Ornith: 9B Ornith — гибрид Qwen3.5, более крупные Ornith дополнительно дообучены на Gemma 4.
 
 Модель-источник сессии OpenCode фильтруется и взвешивается. Вес не выбрасывает остальные, а оставляет предпочитаемые раньше при перемешивании.
 
@@ -411,7 +412,7 @@ python -m scripts.build_dataset \
   --gitlab-store data/gitlab \
   --patterns-store data/patterns \
   --output-dir data/finetune/author \
-  --chat-template qwen3 \
+  --chat-template qwen3.8 \
   --thinking strip \
   --max-tokens 32000 \
   --base-model Qwen/Qwen3.8-27B \
@@ -531,23 +532,23 @@ python -m scripts.eval_dataset \
 Раздача результата llama.cpp. Слитый GGUF:
 
 ```python
-model.save_pretrained_gguf("outputs/qwen3.5-27b-gguf", tokenizer, quantization_method="q5_k_m")
+model.save_pretrained_gguf("outputs/qwen3.8-27b-gguf", tokenizer, quantization_method="q5_k_m")
 ```
 
 ```bash
-llama-server -m outputs/qwen3.5-27b-gguf/model.gguf --jinja -c 200000 --host 127.0.0.1 --port 8080
+llama-server -m outputs/qwen3.8-27b-gguf/model.gguf --jinja -c 200000 --host 127.0.0.1 --port 8080
 ```
 
 Или базовый GGUF плюс адаптер:
 
 ```python
-model.save_pretrained("outputs/qwen3.5-27b-lora")
-tokenizer.save_pretrained("outputs/qwen3.5-27b-lora")
+model.save_pretrained("outputs/qwen3.8-27b-lora")
+tokenizer.save_pretrained("outputs/qwen3.8-27b-lora")
 ```
 
 ```bash
-python convert_lora_to_gguf.py outputs/qwen3.5-27b-lora --outfile adapter.gguf
-llama-server -m qwen3.5-27b-q5_k_xl.gguf --lora adapter.gguf --jinja -c 200000 \
+python convert_lora_to_gguf.py outputs/qwen3.8-27b-lora --outfile adapter.gguf
+llama-server -m qwen3.8-27b-q5_k_xl.gguf --lora adapter.gguf --jinja -c 200000 \
   --host 127.0.0.1 --port 8080
 ```
 
@@ -813,7 +814,7 @@ finetune-curator/
 └── data/                        # только локально
 ```
 
-`scripts/rules/llm.py` по-прежнему отдаёт `request_rules`, `chat_complete` и `thinking_controls`. Новый код берёт чат из `scripts.llm`, а промпт правил оставляет в `scripts.proposals`.
+Чат живёт в `scripts.llm`. Разбор JSON правил — в `scripts.proposals.extract`. Команды `export_opencode` и `export_approved` остаются обёртками.
 
 ## Тесты
 

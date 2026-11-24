@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-score", type=float, default=0.6, help="Unlabeled sessions at or above this score count as successful")
     parser.add_argument("--anonymize", action="store_true")
     parser.add_argument("--anonymize-urls", action="store_true")
+    parser.add_argument("--rules", default="data/rule_proposals.json")
+    parser.add_argument("--rule-decisions", default="data/rule_decisions.json")
     parser.add_argument("--config", default=None, help="gitlab.json with the team-lead aliases")
     parser.add_argument("--team-lead", action="append", default=None)
     parser.add_argument("--mrr-pattern", default=None)
@@ -69,8 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _conventions(args) -> str:
-    path = Path("data/rule_proposals.json")
-    decisions = Path("data/rule_decisions.json")
+    path = Path(args.rules)
+    decisions = Path(args.rule_decisions)
     if not path.exists():
         return ""
     from scripts.proposals.store import approved_rules, load_proposals, load_rule_decisions
@@ -94,7 +96,14 @@ def _one_export(args, profile: dict, task: str, output_dir: Path) -> None:
     max_tokens = args.max_tokens
     if max_tokens is None and dataset.get("max_tokens") and (not args.task or args.task == task):
         max_tokens = int(dataset["max_tokens"])
-    base_model = args.base_model or profile.get("base_model")
+    if args.base_model:
+        base_model = args.base_model
+    elif profile.get("target") == "author" and task == "review":
+        base_model = None
+    elif profile.get("target") == "reviewer" and task != "review":
+        base_model = None
+    else:
+        base_model = profile.get("base_model")
     if task == "author":
         tasks = {"agentic", "style"}
     elif task == "all":
@@ -109,8 +118,10 @@ def _one_export(args, profile: dict, task: str, output_dir: Path) -> None:
         weights[pattern.strip()] = float(value)
     if max_tokens is None:
         max_tokens = REVIEW_MAX_TOKENS if task == "review" else LARGE_MAX_TOKENS
-    ratios = {"agentic": args.agentic, "style": args.style, "review": args.review}
-    ratios = {name: (1.0 if name in tasks else 0.0) for name in ratios}
+    requested = {"agentic": args.agentic, "style": args.style, "review": args.review}
+    ratios = {name: (weight if name in tasks else 0.0) for name, weight in requested.items()}
+    if not any(ratios.values()):
+        ratios = {name: (1.0 if name in tasks else 0.0) for name in requested}
     config = load_signal_config(args.config, team_leads=args.team_lead, mrr_pattern=args.mrr_pattern)
     opencode = Path(args.input) if args.input else None
     gitlab = Path(args.gitlab_store) if args.gitlab_store else None

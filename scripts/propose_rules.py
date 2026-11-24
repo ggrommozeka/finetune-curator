@@ -161,25 +161,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolve(args):
+def resolve_cli_endpoint(
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+    from_opencode: str | None = None,
+    opencode_config: str | None = None,
+):
+    """Resolve the chat endpoint from explicit values, env, then OpenCode config."""
     opencode_base = opencode_key = opencode_model = None
-    if args.from_opencode:
-        config = _load_opencode(args)
+    if from_opencode:
+        config = _load_opencode(argparse.Namespace(opencode_config=opencode_config, from_opencode=from_opencode))
         try:
-            picked = resolve_model_ref(config, args.from_opencode, os.environ)
+            picked = resolve_model_ref(config, from_opencode, os.environ)
         except ValueError as exc:
             raise SystemExit(str(exc)) from exc
         opencode_base = picked.base_url
         opencode_key = picked.api_key
         opencode_model = picked.api_model
     return resolve_endpoint(
-        cli_base_url=args.base_url,
-        cli_api_key=args.api_key,
-        cli_model=args.model,
+        cli_base_url=base_url,
+        cli_api_key=api_key,
+        cli_model=model,
         env=os.environ,
         opencode_base_url=opencode_base,
         opencode_api_key=opencode_key,
         opencode_model=opencode_model,
+    )
+
+
+def _resolve(args):
+    return resolve_cli_endpoint(
+        base_url=args.base_url,
+        api_key=args.api_key,
+        model=args.model,
+        from_opencode=args.from_opencode,
+        opencode_config=getattr(args, "opencode_config", None),
     )
 
 

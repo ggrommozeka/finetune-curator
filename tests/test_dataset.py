@@ -70,6 +70,14 @@ def _gitlab(tmp_path: Path) -> GitlabStore:
                 "author_name": "Lead",
             },
             {
+                "id": "base1",
+                "title": "add parser",
+                "message": "add parser",
+                "created_at": "2024-05-01T03:00:00Z",
+                "author_email": "ada@company.com",
+                "author_name": "Ada Author",
+            },
+            {
                 "id": "quiet1",
                 "title": "add logging",
                 "message": "add logging",
@@ -80,6 +88,13 @@ def _gitlab(tmp_path: Path) -> GitlabStore:
         ],
         {
             "abc123": [{"old_path": "app.py", "new_path": "app.py", "diff": DIFF}],
+            "base1": [
+                {
+                    "old_path": "log.py",
+                    "new_path": "log.py",
+                    "diff": "@@ -1,1 +1,2 @@\n import sys\n+import logging\n",
+                }
+            ],
             "quiet1": [
                 {
                     "old_path": "log.py",
@@ -192,6 +207,8 @@ def test_gitlab_style_review_and_held_out_groups(tmp_path: Path):
     reviewers = {sample.extra.get("reviewer") for sample in gitlab_samples if sample.kind == "review"}
     assert "rita" in reviewers
     assert "omar" in reviewers
+    rita = next(sample for sample in gitlab_samples if sample.extra.get("reviewer") == "rita" and sample.kind == "review")
+    assert "Suggested fix" not in rita.messages[-1]["content"]
     omar = next(sample for sample in gitlab_samples if sample.extra.get("reviewer") == "omar")
     assert "Parser" in omar.messages[1]["content"]
     negative = next(sample for sample in gitlab_samples if sample.kind == "review-negative")
@@ -570,7 +587,7 @@ def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Pat
     assert "<think>" not in blob
     assert "Renamed the helper." in blob
     assert stripped["manifest"]["thinking"] == "strip"
-    assert stripped["manifest"]["target_model"] == "qwen3.8-27b"
+    assert stripped["manifest"]["target_model"] == "Qwen/Qwen3.8-27B"
     assert stripped["manifest"]["base_model"] == "Qwen/Qwen3.8-27B"
     assert stripped["manifest"]["tool_format"] == "qwen3"
     kept = build_samples(
@@ -594,6 +611,47 @@ def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Pat
     )
     assert len(parts) >= 2
     assert all("TASK-START" in json.dumps(part) for part in parts)
+
+
+def test_author_replies_are_not_review_samples():
+    from scripts.datasets.tasks import from_gitlab_bundle
+    from scripts.ingest.gitlab.signals import SignalConfig
+
+    bundle = {
+        "mr": {"project_id": 1, "iid": 1, "title": "Parser", "description": "", "author": {"username": "ada"}},
+        "discussions": [],
+        "commits": [
+            {"id": "base", "message": "add parser", "created_at": "2024-05-01T00:00:00Z", "author_email": "ada@company.com"}
+        ],
+        "diffs_by_sha": {
+            "base": [{"old_path": "app.py", "new_path": "app.py", "diff": "@@ -1,1 +1,2 @@\n def helper():\n+    return 1\n"}]
+        },
+        "files": [],
+        "issues": [],
+        "traces": [
+            {
+                "note_id": "1",
+                "author_username": "rita",
+                "author_role": "reviewer",
+                "body": "Rename it",
+                "status": "addressed_elsewhere",
+                "after": "def parse():\n    return 1\n",
+                "diff": "@@ -1 +1 @@\n-old\n+new\n",
+                "anchor": {"file": "app.py", "new_line_start": 2},
+                "replies": [
+                    {"id": 2, "author_username": "ada", "body": "Done, fixed"},
+                    {"id": 3, "author_username": "omar", "body": "Also check the tests"},
+                ],
+            }
+        ],
+    }
+    samples = from_gitlab_bundle(bundle, SignalConfig(team_leads=(), mrr_pattern=r"\bmrr\b"), review_context_lines=5, context_tokens=8192)
+    reviewers = {sample.extra.get("reviewer") for sample in samples if sample.task == "review" and sample.kind == "review"}
+    assert "ada" not in reviewers
+    assert "rita" in reviewers
+    assert "omar" in reviewers
+    rita = next(sample for sample in samples if sample.extra.get("reviewer") == "rita")
+    assert "Suggested fix" not in rita.messages[-1]["content"]
 
 
 def test_model_weight_survives_mixing_and_rows_keep_metadata():

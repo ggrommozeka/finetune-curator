@@ -35,7 +35,7 @@ def render() -> None:
     )
     markdown = st.text_input("Rules Markdown", value="data/approved_rules.md")
     payload = st.text_input("Rules JSON", value="data/approved_rules.json")
-    skills = st.text_input("Skills dir", value="skills")
+    skills = st.text_input("Skills dir", value="data/skills")
     gitlab_store = st.text_input("GitLab store", value=st.session_state.get("cfg_gitlab", "data/gitlab"))
     gitlab_sft = st.text_input("GitLab SFT", value="data/gitlab_sft.jsonl")
     gitlab_dpo = st.text_input("GitLab DPO", value="data/gitlab_dpo.jsonl")

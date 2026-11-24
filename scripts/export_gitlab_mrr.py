@@ -183,19 +183,9 @@ def _propose(records: list[dict], args) -> None:
         model = "mock"
         base_url = None
     else:
-        import argparse
+        from scripts.propose_rules import resolve_cli_endpoint
 
-        from scripts.propose_rules import _resolve
-
-        endpoint = _resolve(
-            argparse.Namespace(
-                base_url=None,
-                api_key=None,
-                model=None,
-                from_opencode=None,
-                opencode_config=None,
-            )
-        )
+        endpoint = resolve_cli_endpoint()
         if not endpoint.model:
             raise SystemExit(
                 "Set FINETUNE_CURATOR_MODEL or OPENAI_MODEL for --rules, or pass --mock-response."
@@ -298,12 +288,9 @@ def _polish_fn(args):
         raw = Path(args.mock_response).read_text(encoding="utf-8")
         return lambda _messages: raw
     from scripts.llm.client import chat_complete, thinking_controls
-    from scripts.propose_rules import _resolve
-    import argparse
+    from scripts.propose_rules import resolve_cli_endpoint
 
-    endpoint = _resolve(
-        argparse.Namespace(base_url=None, api_key=None, model=None, from_opencode=None, opencode_config=None)
-    )
+    endpoint = resolve_cli_endpoint()
     if not endpoint.model:
         raise SystemExit("Set FINETUNE_CURATOR_MODEL or pass --mock-response with --summarize-polish.")
     _suffix, extra = thinking_controls(True)

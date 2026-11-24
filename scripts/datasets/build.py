@@ -110,7 +110,7 @@ def build_samples(
             "base_model_candidates": target["candidates"],
             "train_precision": target["precision"],
             "variant": variant,
-            "target_model": "qwen3.5-9b" if tasks == {"review"} else "qwen3.8-27b",
+            "target_model": target["base_model"],
             "tasks": sorted(tasks) if tasks else ["agentic", "style", "review"],
             "max_tokens": max_tokens,
             "review_context_lines": review_context_lines,

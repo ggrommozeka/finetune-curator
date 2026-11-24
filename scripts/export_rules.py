@@ -19,8 +19,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--json", default="data/approved_rules.json")
     parser.add_argument(
         "--skills-dir",
-        default=None,
-        help="Also write approved skill proposals as OpenCode SKILL.md directories",
+        default="data/skills",
+        help="Approved skill proposals as OpenCode SKILL.md directories. data/skills is gitignored.",
     )
     args = parser.parse_args(argv)
 
