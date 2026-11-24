@@ -1,0 +1,10 @@
+<think>
+The agent repeated a failing command and also deleted a file the user did not ask for.
+</think>
+```json
+{"rules":[
+  {"text":"When a shell command fails, read the error and change approach instead of retrying it unchanged.","category":"looping","rationale":"The agent repeated the same failing command.","session_ids":["ses_loop"],"evidence":"user: stop running the same command"},
+  {"text":"When a shell command fails, read the error and change the approach instead of retrying it unchanged.","category":"looping","rationale":"Same loop in another session.","session_ids":["ses_loop2"],"evidence":"assistant retried pytest without changes"},
+  {"text":"Ask before deleting files the user did not mention.","category":"safety","rationale":"The agent removed a file on its own.","session_ids":["ses_del"],"evidence":"user: I did not ask you to delete that"}
+]}
+```
