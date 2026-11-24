@@ -736,6 +736,113 @@ def test_lead_polished_hunk_is_not_a_negative():
     assert any("stable" in message["content"] for sample in negatives for message in sample.messages)
 
 
+def _wide_lines() -> str:
+    return "\n".join(f"L{number}" for number in range(1, 61))
+
+
+def test_later_hunk_keeps_its_line_after_an_insertion():
+    from scripts.datasets.tasks import from_gitlab_bundle
+
+    diff = "@@ -0,0 +1,2 @@\n+H1\n+H2\n@@ -41,1 +43,1 @@\n-L41\n+B41\n"
+    commit = {
+        "id": "edit",
+        "message": "add a header and rename L41",
+        "created_at": "2024-05-01T00:00:00Z",
+        "author_email": "ada@company.com",
+        "author_name": "Ada",
+    }
+    for files in (
+        [{"path": "wide.py", "side": "base", "content": _wide_lines()}],
+        [],
+    ):
+        bundle = {
+            "mr": {
+                "project_id": 1,
+                "iid": 8,
+                "title": "Wide",
+                "description": "",
+                "author": {"username": "ada", "name": "Ada"},
+            },
+            "discussions": [],
+            "commits": [commit],
+            "diffs_by_sha": {"edit": [{"old_path": "wide.py", "new_path": "wide.py", "diff": diff}]},
+            "files": files,
+            "issues": [],
+        }
+        samples = from_gitlab_bundle(bundle, SignalConfig(team_leads=("lead@company.com",), mrr_pattern=r"\bmrr\b"))
+        text = "\n".join(
+            message["content"]
+            for sample in samples
+            if sample.kind == "review-negative"
+            for message in sample.messages
+        )
+        assert "-L41\n+B41" in text
+        assert "-L38" not in text
+        assert "-L39" not in text
+        assert "+H1" in text
+
+
+def test_lead_touch_tracks_lines_after_an_insertion():
+    from scripts.datasets.tasks import from_gitlab_bundle
+
+    base = _wide_lines()
+    bundle = {
+        "mr": {
+            "project_id": 1,
+            "iid": 9,
+            "title": "Wide",
+            "description": "",
+            "author": {"username": "ada", "name": "Ada"},
+        },
+        "discussions": [],
+        "commits": [
+            {
+                "id": "author",
+                "message": "edit two lines",
+                "created_at": "2024-05-01T00:00:00Z",
+                "author_email": "ada@company.com",
+                "author_name": "Ada",
+            },
+            {
+                "id": "lead",
+                "message": "header and rewrite",
+                "created_at": "2024-05-02T00:00:00Z",
+                "author_email": "lead@company.com",
+                "author_name": "Lead",
+            },
+        ],
+        "diffs_by_sha": {
+            "author": [
+                {
+                    "old_path": "wide.py",
+                    "new_path": "wide.py",
+                    "diff": "@@ -41,1 +41,1 @@\n-L41\n+A41\n@@ -55,1 +55,1 @@\n-L55\n+A55\n",
+                }
+            ],
+            "lead": [
+                {
+                    "old_path": "wide.py",
+                    "new_path": "wide.py",
+                    "diff": "@@ -0,0 +1,2 @@\n+H1\n+H2\n@@ -41,1 +43,1 @@\n-A41\n+B41\n",
+                }
+            ],
+        },
+        "files": [{"path": "wide.py", "side": "base", "content": base}],
+        "issues": [],
+    }
+    samples = from_gitlab_bundle(bundle, SignalConfig(team_leads=("lead@company.com",), mrr_pattern=r"\bmrr\b"))
+    text = "\n".join(
+        message["content"]
+        for sample in samples
+        if sample.kind == "review-negative"
+        for message in sample.messages
+    )
+    assert "-L55\n+A55" in text
+    assert "A41" not in text
+    assert "B41" not in text
+    assert "+H1" not in text
+
+
 def test_author_replies_are_not_review_samples():
     from scripts.datasets.tasks import from_gitlab_bundle
     from scripts.ingest.gitlab.signals import SignalConfig

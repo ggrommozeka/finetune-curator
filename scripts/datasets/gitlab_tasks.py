@@ -127,7 +127,12 @@ def _base_from_hunks(hunks) -> list[str]:
 
 
 def _apply_hunk(lines: list[str], blame: list, tainted: set[int], hunk, sha: str, excluded: bool):
-    """Replay one hunk. ``tainted`` holds final-file lines a lead or fix commit touched."""
+    """Replay one hunk whose old line numbers still match ``lines``.
+
+    ``tainted`` holds final-file lines a lead or fix commit touched. Callers apply
+    every hunk of one commit from the bottom of the file upward, so an earlier
+    hunk does not move the lines this hunk and its taint update still name.
+    """
     if hunk.old_count == 0:
         prefix = min(max(hunk.old_start, 0), len(lines))
         old_count = 0
@@ -169,6 +174,24 @@ def _apply_hunk(lines: list[str], blame: list, tainted: set[int], hunk, sha: str
     merged_lines = lines[:prefix] + produced + lines[end_old:]
     merged_blame = blame[:prefix] + produced_blame + blame[end_old:]
     return merged_lines, merged_blame, remapped
+
+
+def _bottom_up(hunks: list) -> list:
+    """Later hunks in a commit keep the pre-commit line numbers. Apply the lowest last."""
+    return [
+        hunk
+        for _index, hunk in sorted(
+            enumerate(hunks),
+            key=lambda item: (item[1].old_start, item[1].old_count, item[0]),
+            reverse=True,
+        )
+    ]
+
+
+def _apply_commit(lines: list[str], blame: list, tainted: set[int], hunks: list, sha: str, excluded: bool):
+    for hunk in _bottom_up(hunks):
+        lines, blame, tainted = _apply_hunk(lines, blame, tainted, hunk, sha, excluded)
+    return lines, blame, tainted
 
 
 def _added_blame(hunk, blame: list) -> list:
@@ -220,9 +243,14 @@ def _net_negative_hunks(commits: list[dict], diffs: dict, roles: dict, base_file
         base_lines = list(lines)
         blame: list = [None] * len(lines)
         tainted: set[int] = set()
-        for sha, excluded, diff in touches:
-            for hunk in parse_hunks(diff.get("diff") or ""):
-                lines, blame, tainted = _apply_hunk(lines, blame, tainted, hunk, sha, excluded)
+        index = 0
+        while index < len(touches):
+            sha, excluded, _diff = touches[index]
+            hunks = []
+            while index < len(touches) and touches[index][0] == sha:
+                hunks.extend(parse_hunks(touches[index][2].get("diff") or ""))
+                index += 1
+            lines, blame, tainted = _apply_commit(lines, blame, tainted, hunks, sha, excluded)
         rendered = "\n".join(
             difflib.unified_diff(base_lines, lines, fromfile=path, tofile=path, n=3, lineterm="")
         )
