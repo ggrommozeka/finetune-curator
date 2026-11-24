@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from scripts.rules.export import export_approved, export_skills, render_markdown
-from scripts.export_opencode import stamp_machine
+from scripts.export_opencode import scored_sibling, stamp_machine
 from scripts.rules.propose import propose_rules
 from scripts.rules.store import (
     approved_rules,
@@ -108,6 +108,7 @@ def test_export_formats(tmp_path: Path):
         "session_ids": ["s1", "s2"],
         "evidence": "EVIDENCE_LOOP",
         "source": "opencode",
+        "mode": "per-session",
     }
     assert render_markdown([]).startswith("# Agent harness rules\n")
 
@@ -423,6 +424,56 @@ def test_stamp_machine_keeps_logminer_score(tmp_path: Path):
         text=True,
     ).stdout
     assert "--machine" in help_text
+
+
+def test_legacy_rules_file_becomes_per_session_and_approved_survives(tmp_path: Path):
+    from scripts.rules.export import export_approved
+    from scripts.rules.store import public_rule
+
+    path = tmp_path / "rule_proposals.json"
+    path.write_text(
+        json.dumps(
+            {
+                "rules": [
+                    {"id": "draft", "text": "Old draft", "category": "other"},
+                    {"id": "kept", "text": "Approved wording", "category": "other", "source": "gitlab"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_proposals(path)
+    by_id = {item["id"]: item for item in loaded["proposals"]}
+    assert by_id["draft"]["mode"] == "per-session"
+    assert by_id["kept"]["mode"] == ""
+    assert public_rule(by_id["draft"])["mode"] == "per-session"
+    save_rule_decisions(tmp_path / "rule_decisions.json", {"statuses": {"draft": "approved"}, "edits": {}})
+    upsert_proposals(
+        path,
+        [{"id": "new", "text": "corpus rule", "category": "other", "kind": "rule", "mode": "corpus", "source": "opencode"}],
+        mode="corpus",
+        drop_modes={"per-session"},
+    )
+    kept_ids = {item["id"] for item in load_proposals(path)["proposals"]}
+    assert "draft" in kept_ids
+    assert "kept" in kept_ids
+    assert "new" in kept_ids
+    markdown = tmp_path / "rules.md"
+    export_approved(path, tmp_path / "rule_decisions.json", markdown, tmp_path / "rules.json")
+    exported = markdown.read_text(encoding="utf-8")
+    assert "Old draft" in exported
+    assert "Approved wording" not in exported
+
+
+def test_scored_sibling_ignores_other_machines(tmp_path: Path):
+    out = tmp_path / "laptop-a.jsonl"
+    out.write_text("{}\n", encoding="utf-8")
+    other = tmp_path / "laptop-b_scored.jsonl"
+    other.write_text(json.dumps({"id": "b", "score": 1}) + "\n", encoding="utf-8")
+    assert scored_sibling(out) is None
+    own = tmp_path / "laptop-a_scored.jsonl"
+    own.write_text(json.dumps({"id": "a", "score": 0.2}) + "\n", encoding="utf-8")
+    assert scored_sibling(out) == own
 
 
 def test_export_missing_proposals(tmp_path: Path):

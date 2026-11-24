@@ -156,8 +156,8 @@
             },
             {
               "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-              "title": "MRR fixes: rename helper",
-              "message": "MRR fixes: rename helper\n",
+              "title": "rename helper",
+              "message": "rename helper\n",
               "created_at": "2024-03-01T15:00:00.000Z",
               "author_name": "Ada Author",
               "author_email": "ada@company.com"
