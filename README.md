@@ -66,7 +66,7 @@ flowchart TD
 4. **Предложения** — один список (`kind`: rule или skill). Правила с сессий и из комментариев GitLab пишутся в один файл.
 5. **Ревью GitLab** — слитые MR становятся примерами SFT и DPO. Связанный комментарий можно предложить как правило.
 
-Старый файл `{"rules":[...]}` без поля `mode` читается как черновики `per-session`. Предложение с `source: gitlab` так не помечается. Одобренное предложение не удаляется, когда корпус вычищает черновики.
+Старый файл `{"rules":[...]}` без поля `mode` читается как черновики `per-session`. Предложение с `source: gitlab` так не помечается. Одобренное предложение не удаляется, когда корпус вычищает черновики. На этой ветке корпус ещё и ищет повторяющиеся ошибки по нескольким машинам.
 
 Файлы правил — отдельный результат, не вместо датасета сессий.
 
@@ -326,6 +326,43 @@ python -m scripts.export_gitlab_mrr process \
   --anonymize
 ```
 
+## Поиск паттернов
+
+Это не повторный прогон агента и не A/B harness. Скрипт смотрит много сессий OpenCode и, если есть склад GitLab, следы «комментарий, потом правка» и ханки полировки тимлида. Рекомендация — общее правило или навык под один тип задачи.
+
+Истории нескольких машин попадают в `data/patterns/` (gitignore). Одна и та же сессия в двух выгрузках хранится один раз и помечается всеми машинами. Повторный импорт добавляет только новые сессии источника. SQLite OpenCode читается как `opencode-v2` (JSON session/message/part), `opencode-v1` (колонки role/content) или blob сессии. Незнакомая схема печатает список таблиц и останавливается.
+
+```bash
+python -m scripts.mine_patterns import --source laptop-a --input data/laptop-a.jsonl
+python -m scripts.mine_patterns import --source laptop-b --input ~/.local/share/opencode/opencode.db
+python -m scripts.mine_patterns import --source gitlab --gitlab-store data/gitlab
+
+python -m scripts.mine_patterns annotate --base-url http://127.0.0.1:8080/v1
+python -m scripts.mine_patterns cluster --min-size 3
+python -m scripts.mine_patterns recommend --base-url http://127.0.0.1:8080/v1
+```
+
+Аннотация — один JSON на сессию: тип задачи, проект, инструменты, исход, где сломалось, как поправил пользователь, что сработало. Готовые сессии пропускаются. Кластеры используют эмбеддинги, если заданы `--embeddings-url` и `--embeddings-model`, иначе косинус TF-IDF. Меньше `--min-size` (по умолчанию 3) — шум, рекомендация не строится.
+
+Паттерн становится **правилом**, только если в нём не меньше трёх типов задач. Иначе это **навык**: `.opencode/skills/<id>/SKILL.md` (YAML `name` и `description`, затем шаги и примеры). Конфликты с уже существующим текстом и с тем же типом ошибки на успешных сессиях сохраняются.
+
+`recommend` пишет в `data/rule_proposals.json` (`mode: corpus`) и убирает черновики `per-session`. Одобренные предложения и предложения GitLab при этом не удаляются. Одобряйте их на странице **Правила**. Там же кластеры и переход к сессии или комментарию. Страница **Мониторинг** показывает метрики до/после и откат. `--min-size 1` оставляет одиночные кластеры для отладки.
+
+```bash
+python -m scripts.mine_patterns export \
+  --rules-md data/patterns_rules.md \
+  --rules-json data/patterns_rules.json \
+  --skills-dir skills \
+  --version v1
+
+python -m scripts.mine_patterns report --decisions data/decisions.json --error-type loop
+python -m scripts.mine_patterns rollback --version v1
+```
+
+Экспорт запоминает версии файлов и время. Отчёт сравнивает сессии до и после: средняя оценка LogMiner, доля Discard, как часто возвращается тип ошибки, как часто пользователь поправлял агента. Откат копирует файлы той версии и снимает более поздние. Повторного прогона агента нет.
+
+`annotate` и `recommend` принимают `--mock-response`. Живой адрес по умолчанию — тот же llama-server (`http://localhost:8080/v1`, рассуждение выключено, низкая температура).
+
 ## Каталог файлов
 
 ```
@@ -339,10 +376,12 @@ finetune-curator/
 │   ├── propose_rules.py      # предложения правил
 │   ├── export_rules.py       # одобренные правила
 │   ├── export_gitlab_mrr.py  # sync, обработка, экспорт GitLab
+│   ├── mine_patterns.py      # импорт, аннотация, кластеры, откат
 │   ├── rules/                # отбор, слияние, адрес модели
-│   └── gitlab/               # клиент, склад, связь, анонимизация
+│   ├── gitlab/               # клиент, склад, связь, анонимизация
+│   └── patterns/             # несколько машин, кластеры, навыки
 ├── viewer/
-│   └── app.py                # одно приложение: сессии, GitLab, правила, экспорт
+│   └── app.py                # сессии, GitLab, правила, экспорт, мониторинг
 ├── tests/
 └── data/                     # только локально
 ```

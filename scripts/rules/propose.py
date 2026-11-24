@@ -54,9 +54,7 @@ def propose_rules(
             errors.append(f"batch {index}/{len(transcripts)}: {exc}")
 
     merged = merge_rules(collected, threshold=merge_threshold)
-    proposals = [
-        {**rule, "kind": "rule", "source": "opencode", "mode": "per-session"} for rule in merged
-    ]
+    proposals = [{**rule, "kind": "rule", "mode": "per-session", "source": "opencode"} for rule in merged]
     document = {
         "version": 2,
         "mode": "per-session",

@@ -1,0 +1,8 @@
+{
+  "title": "Stop retry loops",
+  "description": "Use when a shell command fails and the agent is about to run it again unchanged.",
+  "text": "When a command fails, read the error and change the approach instead of retrying it unchanged.",
+  "steps": ["Read the error", "Change the command", "Re-run only the new command"],
+  "examples": ["user: stop running the same command"],
+  "rationale": "The agent looped on one command across several tasks."
+}

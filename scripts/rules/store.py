@@ -45,6 +45,7 @@ def normalize_proposal(item: dict) -> dict:
         "examples": [str(example) for example in examples if str(example).strip()],
         "conflicts": [str(conflict) for conflict in (item.get("conflicts") or [])],
         "mode": str(item.get("mode") or ""),
+        "cluster_id": str(item.get("cluster_id") or ""),
         "source": str(item.get("source") or "opencode"),
     }
 
@@ -210,7 +211,6 @@ def upsert_proposals(
     """
     document = load_proposals(path) if path.exists() else {"version": 2, "proposals": []}
     drop_modes = drop_modes or set()
-    approved = set()
     decisions = load_rule_decisions(decisions_path or decisions_beside(path))
     approved = {key for key, status in (decisions.get("statuses") or {}).items() if status == "approved"}
     by_id = {}
