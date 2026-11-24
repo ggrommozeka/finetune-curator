@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import difflib
+
 from scripts.datasets.context import review_context
 from scripts.datasets.format import clip_diff_context
 from scripts.datasets.sample import NO_ISSUES, REVIEW_SYSTEM, STYLE_SYSTEM, Sample, _with_system
@@ -91,6 +93,151 @@ def _overlaps(start: int, end: int, anchor: dict, pad: int = 2) -> bool:
         return False
     line_end = line_end or line_start
     return not (end < line_start - pad or start > line_end + pad)
+
+
+_NEGATIVE_SKIP = {"author_fix", "team_lead_mrr", "team_lead_other"}
+
+
+def _excluded_touch(role: dict) -> bool:
+    return bool(role.get("mrr")) or role.get("role") in _NEGATIVE_SKIP
+
+
+def _hunk_body(hunk) -> list[str]:
+    return hunk.text.splitlines()[1:]
+
+
+def _base_from_hunks(hunks) -> list[str]:
+    """Old file lines implied by the first commit, when no base snapshot was stored."""
+    lines: list[str] = []
+    for hunk in hunks:
+        if hunk.old_count <= 0:
+            continue
+        before: list[str] = []
+        for raw in _hunk_body(hunk):
+            if not raw or raw.startswith("+") or raw.startswith("\\"):
+                continue
+            before.append(raw[1:] if raw[0] in "- " else raw)
+        start = max(hunk.old_start - 1, 0)
+        while len(lines) < start:
+            lines.append("")
+        lines[start : start + len(before)] = before
+        while len(lines) < start + hunk.old_count:
+            lines.append("")
+    return lines
+
+
+def _apply_hunk(lines: list[str], blame: list, tainted: set[int], hunk, sha: str, excluded: bool):
+    """Replay one hunk. ``tainted`` holds final-file lines a lead or fix commit touched."""
+    if hunk.old_count == 0:
+        prefix = min(max(hunk.old_start, 0), len(lines))
+        old_count = 0
+    else:
+        prefix = min(max(hunk.old_start - 1, 0), len(lines))
+        old_count = hunk.old_count
+    produced: list[str] = []
+    produced_blame: list = []
+    cursor = prefix
+    for raw in _hunk_body(hunk):
+        if not raw or raw.startswith("\\"):
+            continue
+        mark = raw[0]
+        if mark == "+":
+            produced.append(raw[1:])
+            produced_blame.append(sha)
+        elif mark == "-":
+            cursor += 1
+        else:
+            text = raw[1:] if mark == " " else raw
+            produced.append(text)
+            produced_blame.append(blame[cursor] if cursor < len(blame) else None)
+            cursor += 1
+    end_old = prefix + old_count
+    delta = len(produced) - old_count
+    remapped: set[int] = set()
+    for line in tainted:
+        index = line - 1
+        if index < prefix:
+            remapped.add(line)
+        elif index >= prefix + old_count:
+            remapped.add(line + delta)
+    if excluded:
+        if produced:
+            remapped.update(range(prefix + 1, prefix + 1 + len(produced)))
+        else:
+            remapped.add(max(prefix, 1))
+            remapped.add(prefix + 1)
+    merged_lines = lines[:prefix] + produced + lines[end_old:]
+    merged_blame = blame[:prefix] + produced_blame + blame[end_old:]
+    return merged_lines, merged_blame, remapped
+
+
+def _added_blame(hunk, blame: list) -> list:
+    number = hunk.new_start
+    found = []
+    for raw in _hunk_body(hunk):
+        if not raw or raw.startswith("\\"):
+            continue
+        if raw.startswith("+"):
+            found.append(blame[number - 1] if 0 < number <= len(blame) else None)
+            number += 1
+        elif raw.startswith("-"):
+            continue
+        else:
+            number += 1
+    return found
+
+
+def _net_negative_hunks(commits: list[dict], diffs: dict, roles: dict, base_files: dict) -> list[tuple[str, object]]:
+    """Hunks of the MR's base-to-head diff that still belong to untouched author code."""
+    ordered = sorted(
+        commits or [],
+        key=lambda commit: (
+            str(commit.get("created_at") or commit.get("committed_date") or ""),
+            str(commit.get("id") or commit.get("sha") or ""),
+        ),
+    )
+    by_path: dict[str, list[tuple[str, bool, list]]] = {}
+    for commit in ordered:
+        sha = str(commit.get("id") or commit.get("sha") or "")
+        role = roles.get(sha) or {}
+        excluded = _excluded_touch(role)
+        for diff in diffs.get(sha) or []:
+            new_path = diff.get("new_path") or ""
+            old_path = diff.get("old_path") or ""
+            path = new_path if new_path and new_path != "/dev/null" else old_path
+            if not path or path == "/dev/null":
+                continue
+            by_path.setdefault(path, []).append((sha, excluded, diff))
+    kept: list[tuple[str, object]] = []
+    for path, touches in by_path.items():
+        first_hunks = []
+        for _sha, _excluded, diff in touches:
+            first_hunks.extend(parse_hunks(diff.get("diff") or ""))
+            if first_hunks:
+                break
+        base_text = base_files.get(path) or ""
+        lines = base_text.splitlines() if base_text else _base_from_hunks(first_hunks)
+        base_lines = list(lines)
+        blame: list = [None] * len(lines)
+        tainted: set[int] = set()
+        for sha, excluded, diff in touches:
+            for hunk in parse_hunks(diff.get("diff") or ""):
+                lines, blame, tainted = _apply_hunk(lines, blame, tainted, hunk, sha, excluded)
+        rendered = "\n".join(
+            difflib.unified_diff(base_lines, lines, fromfile=path, tofile=path, n=3, lineterm="")
+        )
+        for hunk in parse_hunks(rendered):
+            added = _added_blame(hunk, blame)
+            if added and any(item is not None and _excluded_touch(roles.get(str(item)) or {}) for item in added):
+                continue
+            start = hunk.new_start
+            end = hunk.new_start + max(hunk.new_count, 1) - 1
+            if any(start <= line <= end for line in tainted):
+                continue
+            if not hunk.text.strip():
+                continue
+            kept.append((path, hunk))
+    return kept
 
 
 def review_comment_sample(
@@ -330,45 +477,32 @@ def from_gitlab_bundle(
                 anchor = extract_anchor(note)
                 if anchor.get("file"):
                     commented.append(anchor)
-    seen_diff = set()
-    for sha, files in diffs.items():
-        role = roles.get(str(sha)) or {}
-        if role.get("mrr") or role.get("role") in {"author_fix", "team_lead_mrr", "team_lead_other"}:
+    for index, (path, hunk) in enumerate(_net_negative_hunks(commits, diffs, roles, base_files)):
+        start = hunk.new_start
+        end = hunk.new_start + max(hunk.new_count, 1) - 1
+        if any(item.get("file") == path and _overlaps(start, end, item) for item in commented):
             continue
-        for diff in files or []:
-            path = diff.get("new_path") or diff.get("old_path") or ""
-            for index, hunk in enumerate(parse_hunks(diff.get("diff") or "")):
-                if not hunk.text.strip():
-                    continue
-                start = hunk.new_start
-                end = hunk.new_start + max(hunk.new_count, 1) - 1
-                if any(item.get("file") == path and _overlaps(start, end, item) for item in commented):
-                    continue
-                key = (path, hunk.text)
-                if key in seen_diff:
-                    continue
-                seen_diff.add(key)
-                negative = review_negative_sample(
-                    sample_id=f"review-ok-{project_id}-{iid}-{str(sha)[:8]}-{index}",
-                    group=group,
-                    machine=machine,
-                    file_name=path,
-                    diff=hunk.text,
-                    context=_pack_review(
-                        diff=hunk.text,
-                        file_name=path,
-                        line_start=start,
-                        line_end=end,
-                        mr=mr,
-                        issues=issues,
-                        base_files=base_files,
-                        conventions=conventions,
-                        context_tokens=context_tokens,
-                        review_context_lines=review_context_lines,
-                    ),
-                )
-                if negative:
-                    samples.append(negative)
+        negative = review_negative_sample(
+            sample_id=f"review-ok-{project_id}-{iid}-{index}",
+            group=group,
+            machine=machine,
+            file_name=path,
+            diff=hunk.text,
+            context=_pack_review(
+                diff=hunk.text,
+                file_name=path,
+                line_start=start,
+                line_end=end,
+                mr=mr,
+                issues=issues,
+                base_files=base_files,
+                conventions=conventions,
+                context_tokens=context_tokens,
+                review_context_lines=review_context_lines,
+            ),
+        )
+        if negative:
+            samples.append(negative)
     return samples
 
 

@@ -58,7 +58,7 @@ def build_samples(
         raise ValueError(f"Unknown chat template {chat_template!r}")
     ratios = dict(ratios or DEFAULT_RATIOS)
     if tasks:
-        ratios = {task: (1.0 if task in tasks else 0.0) for task in DEFAULT_RATIOS}
+        ratios = {task: (float(ratios.get(task, 0.0)) if task in tasks else 0.0) for task in DEFAULT_RATIOS}
     machines = load_machine_labels(patterns_root) if patterns_root else {}
     samples = []
     if opencode_path and (not tasks or "agentic" in tasks):

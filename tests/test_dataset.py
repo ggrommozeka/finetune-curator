@@ -93,7 +93,12 @@ def _gitlab(tmp_path: Path) -> GitlabStore:
                     "old_path": "log.py",
                     "new_path": "log.py",
                     "diff": "@@ -1,1 +1,2 @@\n import sys\n+import logging\n",
-                }
+                },
+                {
+                    "old_path": "notes.py",
+                    "new_path": "notes.py",
+                    "diff": "@@ -0,0 +1,1 @@\n+kept\n",
+                },
             ],
             "quiet1": [
                 {
@@ -212,7 +217,9 @@ def test_gitlab_style_review_and_held_out_groups(tmp_path: Path):
     omar = next(sample for sample in gitlab_samples if sample.extra.get("reviewer") == "omar")
     assert "Parser" in omar.messages[1]["content"]
     negative = next(sample for sample in gitlab_samples if sample.kind == "review-negative")
+    assert "kept" in negative.messages[1]["content"]
     assert "Parser" in negative.messages[1]["content"]
+    assert all("import logging" not in sample.messages[1]["content"] for sample in gitlab_samples if sample.kind == "review-negative")
     assert any(sample.kind == "review-negative" for sample in gitlab_samples)
     assert any(sample.kind == "polish" for sample in gitlab_samples)
     assert any(sample.dpo and sample.task == "style" for sample in gitlab_samples)
@@ -611,6 +618,122 @@ def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Pat
     )
     assert len(parts) >= 2
     assert all("TASK-START" in json.dumps(part) for part in parts)
+
+
+def test_requested_ratios_change_the_mix(tmp_path: Path):
+    store = _gitlab(tmp_path)
+    store.close()
+    sessions = tmp_path / "sessions.jsonl"
+    _write_jsonl(
+        sessions,
+        [
+            _session(f"s{i}", [{"role": "user", "content": f"task {i}"}, {"role": "assistant", "content": "ok"}])
+            for i in range(4)
+        ],
+    )
+    decisions = tmp_path / "decisions.json"
+    decisions.write_text(json.dumps({"labels": {f"s{i}": "keep" for i in range(4)}}), encoding="utf-8")
+    config = SignalConfig(team_leads=("lead@company.com",), mrr_pattern=r"\bmrr\b")
+    common = dict(
+        opencode_path=sessions,
+        decisions_path=decisions,
+        gitlab_root=tmp_path / "gitlab",
+        eval_ratio=0,
+        signal_config=config,
+        tasks={"agentic", "style"},
+        max_tokens=32_000,
+    )
+    style_only = build_samples(**common, ratios={"agentic": 0, "style": 1, "review": 0})
+    agentic_only = build_samples(**common, ratios={"agentic": 1, "style": 0, "review": 0})
+    assert style_only["train"]
+    assert {sample.task for sample in style_only["train"]} == {"style"}
+    assert agentic_only["train"]
+    assert {sample.task for sample in agentic_only["train"]} == {"agentic"}
+    assert len(agentic_only["train"]) != len(style_only["train"])
+    out = tmp_path / "cli"
+    build_main(
+        [
+            "--input",
+            str(sessions),
+            "--decisions",
+            str(decisions),
+            "--gitlab-store",
+            str(tmp_path / "gitlab"),
+            "--output-dir",
+            str(out),
+            "--task",
+            "author",
+            "--agentic",
+            "0",
+            "--style",
+            "1",
+            "--review",
+            "1",
+            "--eval-ratio",
+            "0",
+            "--team-lead",
+            "lead@company.com",
+        ]
+    )
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["ratios"] == {"agentic": 0.0, "style": 1.0, "review": 0.0}
+    rows = [json.loads(line) for line in (out / "train.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert rows
+    assert {row["task"] for row in rows} == {"style"}
+
+
+def test_lead_polished_hunk_is_not_a_negative():
+    from scripts.datasets.tasks import from_gitlab_bundle
+
+    bundle = {
+        "mr": {
+            "project_id": 1,
+            "iid": 4,
+            "title": "Cleanup",
+            "description": "",
+            "author": {"username": "ada", "name": "Ada"},
+        },
+        "discussions": [],
+        "commits": [
+            {
+                "id": "orig",
+                "message": "add messy helper",
+                "created_at": "2024-05-01T00:00:00Z",
+                "author_email": "ada@company.com",
+                "author_name": "Ada",
+            },
+            {
+                "id": "clean",
+                "message": "add stable helper",
+                "created_at": "2024-05-01T01:00:00Z",
+                "author_email": "ada@company.com",
+                "author_name": "Ada",
+            },
+            {
+                "id": "lead",
+                "message": "tidy the helper",
+                "created_at": "2024-05-02T00:00:00Z",
+                "author_email": "lead@company.com",
+                "author_name": "Lead",
+            },
+        ],
+        "diffs_by_sha": {
+            "orig": [{"old_path": "c.py", "new_path": "c.py", "diff": "@@ -0,0 +1,1 @@\n+messy\n"}],
+            "clean": [{"old_path": "ok.py", "new_path": "ok.py", "diff": "@@ -0,0 +1,1 @@\n+stable\n"}],
+            "lead": [{"old_path": "c.py", "new_path": "c.py", "diff": "@@ -1,1 +1,1 @@\n-messy\n+tidy\n"}],
+        },
+        "files": [],
+        "issues": [],
+    }
+    samples = from_gitlab_bundle(
+        bundle,
+        SignalConfig(team_leads=("lead@company.com",), mrr_pattern=r"\bmrr\b"),
+    )
+    negatives = [sample for sample in samples if sample.kind == "review-negative"]
+    text = "\n".join(message["content"] for sample in negatives for message in sample.messages)
+    assert "messy" not in text
+    assert "tidy" not in text
+    assert any("stable" in message["content"] for sample in negatives for message in sample.messages)
 
 
 def test_author_replies_are_not_review_samples():
