@@ -464,14 +464,13 @@ class GitlabStore:
         since: str = "",
         until: str = "",
         linked_only: bool = False,
-        fixes_only: bool = False,
         min_comments: int = 0,
     ) -> list[dict]:
         rows = self._conn.execute(
             "SELECT * FROM merge_requests ORDER BY merged_at DESC, project_id, iid"
         ).fetchall()
         found = []
-        want_linked = linked_only or fixes_only
+        want_linked = linked_only
         for row in rows:
             item = self._summary(row)
             if project and project.lower() not in " ".join(
@@ -529,7 +528,6 @@ class GitlabStore:
             "comment_count": len(notes),
             "linked_count": int(linked_count),
             "mrr_count": mrr_count,
-            "fix_count": int(linked_count),
             "role_counts": role_counts,
             "lead_count": role_counts.get("team_lead_mrr", 0) + role_counts.get("team_lead_other", 0),
             "reviewers": reviewers,

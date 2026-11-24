@@ -6,7 +6,8 @@ from datetime import datetime
 
 from scripts.gitlab.client import merge_request_path
 from scripts.gitlab.examples import apply_anonymization, build_sft_record
-from scripts.gitlab.link import DEFAULT_FIX_PATTERN, in_range, parse_time
+from scripts.gitlab.link import in_range, parse_time
+from scripts.gitlab.signals import DEFAULT_MRR_PATTERN, SignalConfig
 
 
 def _mr_moment(mr: dict) -> datetime | None:
@@ -49,41 +50,72 @@ def list_merge_requests(client, projects: list[str], groups: list[str], since: d
     return found
 
 
+def linked_review(
+    mr: dict,
+    discussions: list,
+    commits: list,
+    diffs_by_sha: dict[str, list],
+    config: SignalConfig,
+    *,
+    line_pad: int = 2,
+    files: list | None = None,
+    overrides: dict | None = None,
+) -> tuple[list[dict], list[dict]]:
+    """Traces for comment fixes, and the commit roles.
+
+    Team-lead and MRR commits are omitted from the link. The same function is
+    used by the live exporter and by offline ``process_store``.
+    """
+    from scripts.gitlab.classify import classify_commits, commits_for_comment_fixes
+    from scripts.gitlab.trace import build_traces
+
+    roles = classify_commits(commits, mr, discussions, config)
+    traces = build_traces(
+        discussions,
+        commits_for_comment_fixes(commits, roles),
+        diffs_by_sha,
+        mr,
+        line_pad=line_pad,
+        files=files,
+        overrides=overrides,
+    )
+    return traces, roles
+
+
 def records_from_bundle(
     mr: dict,
     discussions: list,
     commits: list,
     diffs_by_sha: dict[str, list],
     *,
-    reviewer: str | None,
-    fix_pattern: str,
     line_pad: int,
     max_chars: int,
-    signal_config=None,
-) -> tuple[list[dict], dict]:
-    """Link comments to fixes using only data already in memory.
+    signal_config: SignalConfig | None = None,
+    files: list | None = None,
+    overrides: dict | None = None,
+    complete_fn=None,
+) -> tuple[list[dict], dict, list[dict], list[dict]]:
+    """Return records, stats, traces, and roles. No reviewer filter."""
+    from scripts.gitlab.polish import build_polish_records
 
-    ``reviewer`` is accepted so older callers keep working. It does not drop comments.
-    """
-    from scripts.gitlab.trace import build_traces
-
-    _ = reviewer
-    traces = build_traces(
+    config = signal_config or SignalConfig(team_leads=tuple(), mrr_pattern=DEFAULT_MRR_PATTERN)
+    traces, roles = linked_review(
+        mr,
         discussions,
         commits,
         diffs_by_sha,
-        mr,
+        config,
         line_pad=line_pad,
+        files=files,
+        overrides=overrides,
     )
     records, stats = records_from_traces(mr, traces, max_chars=max_chars)
-    from scripts.gitlab.polish import build_polish_records
-    from scripts.gitlab.signals import SignalConfig
-
-    config = signal_config or SignalConfig(team_leads=tuple(), mrr_pattern=fix_pattern)
-    polish = build_polish_records(mr, commits, diffs_by_sha, discussions, config, max_chars=max_chars)
+    polish = build_polish_records(
+        mr, commits, diffs_by_sha, discussions, config, max_chars=max_chars, complete_fn=complete_fn
+    )
     records.extend(polish)
     stats["polish"] = len(polish)
-    return records, stats
+    return records, stats, traces, roles
 
 
 def records_from_traces(mr: dict, traces: list[dict], max_chars: int) -> tuple[list[dict], dict]:
@@ -143,11 +175,9 @@ def records_for_mr(
     client,
     mr: dict,
     *,
-    reviewer: str | None,
-    fix_pattern: str,
     line_pad: int,
     max_chars: int,
-    signal_config=None,
+    signal_config: SignalConfig | None = None,
 ) -> tuple[list[dict], dict]:
     project_id = mr.get("project_id")
     iid = mr.get("iid")
@@ -162,17 +192,16 @@ def records_for_mr(
         if not sha:
             continue
         diffs_by_sha[sha] = client.get_all_optional(f"/api/v4/projects/{project_id}/repository/commits/{sha}/diff")
-    return records_from_bundle(
+    records, stats, _traces, _roles = records_from_bundle(
         mr,
         discussions,
         commits,
         diffs_by_sha,
-        reviewer=reviewer,
-        fix_pattern=fix_pattern,
         line_pad=line_pad,
         max_chars=max_chars,
         signal_config=signal_config,
     )
+    return records, stats
 
 
 def export_records(
@@ -182,8 +211,6 @@ def export_records(
     groups: list[str],
     since: datetime | None = None,
     until: datetime | None = None,
-    reviewer: str | None = None,
-    fix_pattern: str = DEFAULT_FIX_PATTERN,
     line_pad: int = 2,
     max_chars: int = 8000,
     anonymize: bool = False,
@@ -197,8 +224,6 @@ def export_records(
         batch, stats = records_for_mr(
             client,
             mr,
-            reviewer=reviewer,
-            fix_pattern=fix_pattern,
             line_pad=line_pad,
             max_chars=max_chars,
             signal_config=signal_config,

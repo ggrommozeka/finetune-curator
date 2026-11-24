@@ -11,6 +11,24 @@ import sys
 from pathlib import Path
 
 
+def scored_sibling(out: Path) -> Path | None:
+    """Scored JSONL that belongs to this export, not another machine's file."""
+    direct = out.with_name(out.stem + "_scored.jsonl")
+    if direct.is_file() and direct.resolve() != out.resolve():
+        return direct
+    parent = out.parent
+    stem = out.stem
+    found: list[Path] = []
+    for pattern in (f"{stem}*scored*.jsonl", f"*{stem}*scored*.jsonl"):
+        for path in parent.glob(pattern):
+            if path.resolve() == out.resolve() or path in found:
+                continue
+            if stem not in path.stem:
+                continue
+            found.append(path)
+    return found[0] if found else None
+
+
 def stamp_machine(path: Path, machine: str) -> int:
     """Write ``machine`` onto each JSONL object. Scores and other fields stay."""
     label = (machine or "").strip()
@@ -128,16 +146,7 @@ def main() -> None:
 
     # LogMiner also writes intermediates next to --output (e.g. *_scored.jsonl).
     # Prefer the scored file for the viewer if present — richer metadata.
-    scored = out.with_name(out.stem + "_scored.jsonl")
-    if not scored.exists():
-        # Some versions use prefix pattern: training_scored.jsonl from training.jsonl
-        parent = out.parent
-        stem = out.stem
-        candidates = list(parent.glob(f"*{stem}*scored*.jsonl")) + list(
-            parent.glob("*_scored.jsonl")
-        )
-        if candidates:
-            scored = candidates[0]
+    scored = scored_sibling(out) or out.with_name(out.stem + "_scored.jsonl")
 
     if args.machine:
         stamp_machine(out, args.machine)

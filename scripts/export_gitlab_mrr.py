@@ -97,7 +97,6 @@ def _process_flags(parser: argparse.ArgumentParser) -> None:
         help="Alias of the single team lead (username, name, or email). Repeatable.",
     )
     parser.add_argument("--mrr-pattern", default=None, help="Case-insensitive regex for MRR polish titles (default: \\bmrr\\b)")
-    parser.add_argument("--fix-pattern", default=None, help="Deprecated alias of --mrr-pattern")
     parser.add_argument("--summarize-polish", action="store_true", help="Ask the local model to label each team-lead hunk")
     parser.add_argument("--line-pad", type=int, default=2)
     parser.add_argument("--max-hunk-chars", type=int, default=8000)
@@ -128,7 +127,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only MRs with at least one comment linked to a later commit.",
     )
-    listing.add_argument("--fixes-only", action="store_true", help="Deprecated alias of --linked-only.")
     listing.add_argument("--min-comments", type=int, default=0)
 
     process = sub.add_parser("process", help="Link comments and build examples offline")
@@ -227,6 +225,7 @@ def _propose(records: list[dict], args) -> None:
     destination = Path(args.rules_output)
     for item in document.get("proposals") or []:
         item["source"] = "gitlab"
+        item["mode"] = "corpus"
     upsert_proposals(destination, document.get("proposals") or [])
     print(f"Rules: {len(document.get('proposals') or [])} -> {destination}")
 
@@ -263,8 +262,7 @@ def _cmd_sync(args) -> None:
 def _signals(args):
     from scripts.gitlab.signals import load_signal_config
 
-    pattern = args.mrr_pattern or args.fix_pattern
-    return load_signal_config(getattr(args, "config", None), team_leads=args.team_lead, mrr_pattern=pattern)
+    return load_signal_config(getattr(args, "config", None), team_leads=args.team_lead, mrr_pattern=args.mrr_pattern)
 
 
 def _cmd_list(args) -> None:
@@ -277,7 +275,6 @@ def _cmd_list(args) -> None:
             since=args.since,
             until=args.until,
             linked_only=args.linked_only,
-            fixes_only=args.fixes_only,
             min_comments=args.min_comments,
         )
     finally:
@@ -326,7 +323,7 @@ def _cmd_process(args) -> None:
         stats = process_store(
             store,
             refs,
-            fix_pattern=config.mrr_pattern,
+            mrr_pattern=config.mrr_pattern,
             signal_config=config,
             complete_fn=_polish_fn(args),
             line_pad=args.line_pad,

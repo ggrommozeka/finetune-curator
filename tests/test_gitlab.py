@@ -23,7 +23,6 @@ from scripts.gitlab.examples import sft_to_dpo
 from scripts.gitlab.export import export_records
 from scripts.gitlab.link import (
     comment_target,
-    is_fix_message,
     link_comment,
     parse_hunks,
     parse_user_time,
@@ -144,9 +143,10 @@ def test_line_movement_and_non_fix_commits():
 
 
 def test_link_file_line_then_file_then_mr():
-    assert is_fix_message("MRR fixes: rename", r"mrr\s*fixes")
-    assert is_fix_message("mrr\nfixes typo", r"mrr\s*fixes")
-    assert not is_fix_message("Initial implementation", r"mrr\s*fixes")
+    from scripts.gitlab.signals import is_mrr_title
+
+    assert is_mrr_title("MRR fixes: rename")
+    assert not is_mrr_title("rename helper")
     hunks = parse_hunks("@@ -10,5 +10,5 @@ def helper():\n context\n-old_name\n+parse_config\n context2\n")
     assert hunks[0].before.splitlines()[1] == "old_name"
     assert "parse_config" in hunks[0].after
@@ -214,7 +214,6 @@ def test_export_fixture_anonymizes_and_builds_dpo(tmp_path: Path):
         groups=[],
         since=since,
         until=until,
-        reviewer="teamlead",
         anonymize=True,
         anonymize_urls=True,
     )
@@ -439,7 +438,7 @@ def test_sync_is_incremental_and_process_is_offline(tmp_path: Path):
     assert [row["ref"] for row in listed] == ["1!7"]
     assert listed[0]["linked_count"] == 0
     assert store.list_mrs(linked_only=True) == []
-    assert store.list_mrs(fixes_only=True, since="2025-01-01") == []
+    assert store.list_mrs(linked_only=True, since="2025-01-01") == []
     client.transport = transport
     refreshed = sync_store(client, store, refresh=["1!7"])
     assert refreshed["refreshed"] == 1
@@ -616,7 +615,6 @@ def test_list_counts_linked_traces_separately_from_mrr(tmp_path: Path):
         project_path="group/app",
     )
     assert store.list_mrs(linked_only=True) == []
-    assert store.list_mrs(fixes_only=True) == []
     store.replace_traces(
         1,
         7,
@@ -631,7 +629,7 @@ def test_list_counts_linked_traces_separately_from_mrr(tmp_path: Path):
     assert [row["ref"] for row in listed] == ["1!7"]
     assert listed[0]["linked_count"] == 1
     assert listed[0]["mrr_count"] == 1
-    assert listed[0]["fix_count"] == listed[0]["linked_count"]
+    assert listed[0]["linked_count"] == 1
     store.close()
 
 
@@ -690,3 +688,61 @@ def test_linked_issues_from_title_and_other_project(tmp_path: Path, caplog):
     loaded = store.load_bundle(1, 7)
     assert [item["title"] for item in loaded["issues"]] == ["Local", "Cross"]
     store.close()
+
+
+def test_team_lead_mrr_commit_is_not_a_comment_fix():
+    from scripts.gitlab.export import records_from_bundle
+    from scripts.gitlab.signals import SignalConfig
+
+    mr = {
+        "project_id": 1,
+        "iid": 2,
+        "title": "Polish",
+        "author": {"username": "ada", "name": "Ada"},
+        "web_url": "https://gitlab.example.com/group/app/-/merge_requests/2",
+    }
+    discussions = [
+        {
+            "id": "d",
+            "notes": [
+                {
+                    "id": 9,
+                    "body": "Rename the helper",
+                    "system": False,
+                    "created_at": "2024-06-01T10:00:00Z",
+                    "author": {"username": "rita", "name": "Rita"},
+                    "position": {"new_path": "app.py", "new_line": 2},
+                }
+            ],
+        }
+    ]
+    commits = [
+        {
+            "id": "lead1",
+            "title": "MRR polish",
+            "message": "MRR polish",
+            "created_at": "2024-06-01T12:00:00Z",
+            "author_email": "lead@company.com",
+            "author_name": "Lead",
+        }
+    ]
+    diffs = {
+        "lead1": [{"old_path": "app.py", "new_path": "app.py", "diff": "@@ -1,1 +1,1 @@\n-old_name\n+parse_config\n"}]
+    }
+    config = SignalConfig(team_leads=("lead@company.com",), mrr_pattern=r"\bmrr\b")
+    records, stats, traces, _roles = records_from_bundle(
+        mr, discussions, commits, diffs, line_pad=2, max_chars=4000, signal_config=config
+    )
+    assert traces[0]["status"] != "linked"
+    assert traces[0]["commit_sha"] != "lead1"
+    assert stats["file_line"] == 0
+    assert all(record.get("source") != "gitlab_review" or record["gitlab"].get("commit_sha") != "lead1" for record in records)
+
+
+def test_issue_url_keeps_its_project():
+    from scripts.gitlab.sync import linked_issue_refs
+
+    refs = linked_issue_refs("See https://gitlab.example.com/grp/sub/proj/-/issues/5 and #2")
+    assert ("grp/sub/proj", "5") in refs
+    assert ("", "5") not in refs
+    assert ("", "2") in refs
