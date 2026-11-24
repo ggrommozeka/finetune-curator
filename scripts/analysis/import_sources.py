@@ -155,8 +155,39 @@ def _turns_from_parts(parts: list[dict], default_role: str = "assistant") -> lis
     return messages
 
 
-def _part_payloads(conn: sqlite3.Connection, session_id_value: str, message_id: str | None = None) -> list[dict]:
-    part_cols = _table_columns(conn, "part")
+def _column_lookup(conn: sqlite3.Connection):
+    cache: dict[str, set[str]] = {}
+
+    def columns(table: str) -> set[str]:
+        if table not in cache:
+            cache[table] = _table_columns(conn, table)
+        return cache[table]
+
+    return columns
+
+
+def _message_model(data: dict, row) -> dict | str | None:
+    """OpenCode stores the model as a nested object or as top-level providerID/modelID."""
+    model = data.get("model")
+    if model:
+        return model
+    if "model" in row.keys() and row["model"]:
+        return row["model"]
+    provider = data.get("providerID") or data.get("provider_id") or data.get("provider") or ""
+    name = data.get("modelID") or data.get("model_id") or ""
+    if provider or name:
+        return {"providerID": str(provider), "modelID": str(name)}
+    return None
+
+
+def _part_payloads(
+    conn: sqlite3.Connection,
+    session_id_value: str,
+    message_id: str | None = None,
+    columns=None,
+) -> list[dict]:
+    columns = columns or _column_lookup(conn)
+    part_cols = columns("part")
     if not part_cols or "data" not in part_cols:
         return []
     order = "time_created, id" if "time_created" in part_cols and "id" in part_cols else "id" if "id" in part_cols else "rowid"
@@ -189,8 +220,9 @@ def _attach_model(record: dict, session=None) -> dict:
 
 
 def _rows_from_v2(conn: sqlite3.Connection) -> list[dict]:
-    session_cols = _table_columns(conn, "session")
-    message_cols = _table_columns(conn, "message")
+    columns = _column_lookup(conn)
+    session_cols = columns("session")
+    message_cols = columns("message")
     title_col = "title" if "title" in session_cols else None
     created_col = next((name for name in ("time_created", "created_at", "time_updated") if name in session_cols), None)
     project_col = next((name for name in ("project_id", "directory", "slug") if name in session_cols), None)
@@ -208,21 +240,21 @@ def _rows_from_v2(conn: sqlite3.Connection) -> list[dict]:
             for row in rows:
                 data = _json_obj(row["data"]) if "data" in row.keys() else {}
                 role = str(data.get("role") or (row["role"] if "role" in row.keys() else "") or "assistant")
-                payloads = _part_payloads(conn, str(sid), str(row["id"]) if "id" in row.keys() else None)
-                if not payloads and "message_id" not in _table_columns(conn, "part"):
-                    payloads = []
+                payloads = _part_payloads(
+                    conn, str(sid), str(row["id"]) if "id" in row.keys() else None, columns
+                )
                 turns = _turns_from_parts(payloads, default_role=role)
                 if not turns and (data.get("content") or data.get("text")):
                     turns = [{"role": role, "content": _text(data.get("content") or data.get("text"))}]
+                model = _message_model(data, row)
                 for turn in turns:
                     if turn.get("role") != "tool" and not any(part.get("role") for part in payloads):
                         turn["role"] = role
-                    model = data.get("model") or (row["model"] if "model" in row.keys() else None)
                     if model and "model" not in turn:
                         turn["model"] = model
                 messages.extend(turns)
         if not messages:
-            messages = _turns_from_parts(_part_payloads(conn, str(sid)))
+            messages = _turns_from_parts(_part_payloads(conn, str(sid), columns=columns))
         record = {
             "id": str(sid),
             "title": session[title_col] if title_col else "",

@@ -114,15 +114,26 @@ def test_import_dedupes_incremental_and_sqlite_schemas(tmp_path: Path):
         ],
         [
             {
+                "id": "fix1",
+                "title": "rename helper",
+                "message": "rename helper",
+                "created_at": "2024-06-01T01:30:00Z",
+                "author_email": "a@company.com",
+                "author_name": "A",
+            },
+            {
                 "id": "abc123",
                 "title": "MRR fixes rename",
                 "message": "MRR fixes rename",
                 "created_at": "2024-06-01T02:00:00Z",
                 "author_email": "lead@company.com",
                 "author_name": "Lead",
-            }
+            },
         ],
-        {"abc123": [{"old_path": "a.py", "new_path": "a.py", "diff": "@@ -1,3 +1,3 @@\n a\n-old\n+new\n"}]},
+        {
+            "fix1": [{"old_path": "a.py", "new_path": "a.py", "diff": "@@ -1,3 +1,3 @@\n a\n-old\n+new\n"}],
+            "abc123": [{"old_path": "a.py", "new_path": "a.py", "diff": "@@ -1,1 +1,1 @@\n-old\n+polished\n"}],
+        },
         [],
         project_path="group/app",
     )
@@ -294,6 +305,59 @@ def test_v2_parts_keep_tools_and_model_comes_from_messages(tmp_path: Path):
     assert session["source_model"] == "llama/qwen3"
     assert session["source_provider"] == "llama"
     store.close()
+
+
+def test_v2_message_uses_top_level_provider_and_model_ids(tmp_path: Path):
+    store = PatternStore(tmp_path / "patterns")
+    path = tmp_path / "v2.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE session (id TEXT, title TEXT, time_created TEXT)")
+    conn.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created TEXT, data TEXT)")
+    conn.execute("CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created TEXT, data TEXT)")
+    conn.execute("INSERT INTO session VALUES ('s', 'Real', '2024-07-01T00:00:00Z')")
+    conn.execute(
+        "INSERT INTO message VALUES ('m', 's', '2024-07-01T00:00:01Z', ?)",
+        (json.dumps({"role": "assistant", "providerID": "llama", "modelID": "qwen3-27b"}),),
+    )
+    conn.execute(
+        "INSERT INTO part VALUES ('p', 'm', 's', '2024-07-01T00:00:02Z', ?)",
+        (json.dumps({"type": "text", "text": "edited the parser"}),),
+    )
+    conn.commit()
+    conn.close()
+    assert import_path(store, path, source_label="desktop")["added"] == 1
+    session = store.sessions()[0]
+    assert session["source_model"] == "llama/qwen3-27b"
+    assert session["source_provider"] == "llama"
+    assert session["messages"][0]["content"] == "edited the parser"
+    store.close()
+
+
+def test_corpus_recommend_keeps_approved_and_gitlab_proposals(tmp_path: Path):
+    from scripts.proposals.store import load_proposals, save_proposals, save_rule_decisions, upsert_proposals
+
+    path = tmp_path / "rule_proposals.json"
+    save_proposals(
+        path,
+        {
+            "version": 2,
+            "proposals": [
+                {"id": "draft", "text": "draft", "category": "other", "kind": "rule", "mode": "per-session", "source": "opencode"},
+                {"id": "kept", "text": "approved", "category": "other", "kind": "rule", "mode": "per-session", "source": "opencode"},
+                {"id": "gl", "text": "from gitlab", "category": "other", "kind": "rule", "mode": "corpus", "source": "gitlab"},
+            ],
+        },
+    )
+    save_rule_decisions(tmp_path / "rule_decisions.json", {"statuses": {"kept": "approved"}, "edits": {}})
+    upsert_proposals(
+        path,
+        [{"id": "new", "text": "corpus", "category": "other", "kind": "rule", "mode": "corpus", "source": "opencode"}],
+        mode="corpus",
+        drop_modes={"per-session"},
+    )
+    ids = {item["id"] for item in load_proposals(path)["proposals"]}
+    assert "draft" not in ids
+    assert {"kept", "gl", "new"} <= ids
 
 
 def test_machine_on_the_row_does_not_need_the_pattern_label(tmp_path: Path):

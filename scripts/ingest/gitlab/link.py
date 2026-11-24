@@ -11,7 +11,6 @@ FILE_CONFIDENCE = 0.55
 MR_CONFIDENCE = 0.3
 
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
-DEFAULT_FIX_PATTERN = r"\bmrr\b"
 
 
 @dataclass
@@ -23,12 +22,6 @@ class Hunk:
     text: str
     before: str
     after: str
-
-
-def is_fix_message(message: str, pattern: str = DEFAULT_FIX_PATTERN) -> bool:
-    if not message or not pattern:
-        return False
-    return re.search(pattern, message, flags=re.IGNORECASE) is not None
 
 
 def parse_time(value: str) -> datetime:

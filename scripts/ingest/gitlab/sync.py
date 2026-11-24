@@ -11,7 +11,7 @@ from datetime import datetime
 from scripts.ingest.gitlab.client import GitLabError, quote_id
 from scripts.ingest.gitlab.anonymize import Anonymizer
 from scripts.ingest.gitlab.export import list_merge_requests
-from scripts.ingest.gitlab.link import DEFAULT_FIX_PATTERN
+from scripts.ingest.gitlab.signals import DEFAULT_MRR_PATTERN
 from scripts.ingest.gitlab.signals import SignalConfig
 from scripts.ingest.gitlab.store import GitlabStore
 
@@ -35,7 +35,9 @@ def _diff_paths(diff: dict) -> list[str]:
 _LOG = logging.getLogger(__name__)
 # Cross-project ``group/project#123`` before a bare ``#123`` or ``issues/123``.
 _ISSUE_REF = re.compile(
-    r"(?P<path>[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+)#(?P<iid>\d+)|(?:#|issues/)(?P<local>\d+)"
+    r"(?:https?://[^/\s]+/)?(?P<urlpath>(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+)/-/issues/(?P<urliid>\d+)"
+    r"|(?P<path>[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+)#(?P<iid>\d+)"
+    r"|(?:#|(?<!/-)issues/)(?P<local>\d+)"
 )
 
 
@@ -47,8 +49,8 @@ def linked_issue_refs(*texts: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
     for text in texts:
         for match in _ISSUE_REF.finditer(text or ""):
-            iid = match.group("iid") or match.group("local")
-            path = match.group("path") or ""
+            iid = match.group("urliid") or match.group("iid") or match.group("local")
+            path = match.group("urlpath") or match.group("path") or ""
             item = (path, iid)
             if item not in found:
                 found.append(item)
@@ -330,7 +332,7 @@ def process_store(
     store: GitlabStore,
     refs: list[str],
     *,
-    fix_pattern: str = DEFAULT_FIX_PATTERN,
+    mrr_pattern: str = DEFAULT_MRR_PATTERN,
     line_pad: int = 2,
     max_chars: int = 8000,
     anonymize: bool = False,
@@ -343,25 +345,25 @@ def process_store(
     Every reviewer's comments are stored. A reviewer filter belongs on list and
     the viewer, not on this write path.
     """
-    from scripts.ingest.gitlab.classify import classify_commits
     from scripts.ingest.gitlab.examples import apply_anonymization
-    from scripts.ingest.gitlab.export import records_from_traces
+    from scripts.ingest.gitlab.export import linked_review, records_from_traces
     from scripts.ingest.gitlab.polish import build_polish_records
     from scripts.ingest.gitlab.signals import load_signal_config
-    from scripts.ingest.gitlab.trace import build_traces
 
     totals = {"merge_requests": 0, "examples": 0, "comments": 0, "file_line": 0, "file": 0, "mr": 0, "unlinked": 0}
+    config = signal_config or load_signal_config(mrr_pattern=mrr_pattern)
     for ref in refs:
         project_id, iid = store.resolve_ref(ref)
         bundle = store.load_bundle(project_id, iid)
         if bundle is None:
             raise KeyError(ref)
         overrides = store.overrides_for(project_id, iid)
-        traces = build_traces(
+        traces, roles = linked_review(
+            bundle["mr"],
             bundle["discussions"],
             bundle["commits"],
             bundle["diffs_by_sha"],
-            bundle["mr"],
+            config,
             line_pad=line_pad,
             files=bundle.get("files") or [],
             overrides=overrides,
@@ -369,8 +371,6 @@ def process_store(
         if anonymize or anonymize_urls:
             traces = _anonymize_traces(traces, strip_urls=anonymize_urls)
         store.replace_traces(project_id, iid, traces)
-        config = signal_config or load_signal_config(mrr_pattern=fix_pattern)
-        roles = classify_commits(bundle["commits"], bundle["mr"], bundle["discussions"], config)
         store.replace_roles(project_id, iid, roles)
         records, stats = records_from_traces(bundle["mr"], traces, max_chars)
         polish = build_polish_records(

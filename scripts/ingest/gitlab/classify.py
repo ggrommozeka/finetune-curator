@@ -78,3 +78,22 @@ def classify_commits(
             }
         )
     return rows
+
+
+def commits_for_comment_fixes(commits: list[dict], roles: list[dict]) -> list[dict]:
+    """Commits that may address a review comment.
+
+    Team-lead commits and MRR-titled commits are polish, not comment fixes.
+    """
+    skipped = {
+        row["sha"]
+        for row in roles
+        if row.get("mrr") or str(row.get("role") or "").startswith("team_lead")
+    }
+    kept = []
+    for commit in commits or []:
+        sha = str(commit.get("id") or commit.get("sha") or "")
+        if sha in skipped:
+            continue
+        kept.append(commit)
+    return kept

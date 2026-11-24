@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.ingest.gitlab.link import DEFAULT_FIX_PATTERN  # noqa: E402
+from scripts.ingest.gitlab.signals import DEFAULT_MRR_PATTERN  # noqa: E402
 from scripts.ingest.gitlab.store import GitlabStore  # noqa: E402
 from scripts.ingest.gitlab.sync import process_store  # noqa: E402
 from shared import esc as _esc  # noqa: E402
@@ -31,7 +31,7 @@ def render() -> None:
         reviewer = st.text_input("Ревьюер", key="gl_reviewer", **_widget_value("gl_reviewer", ""))
         since = st.text_input("С даты", key="gl_since", **_widget_value("gl_since", ""))
         until = st.text_input("По дату", key="gl_until", **_widget_value("gl_until", ""))
-        fixes_only = st.checkbox(
+        linked_only = st.checkbox(
             "Только со связанными комментариями",
             key="gl_fixes",
             **_widget_value("gl_fixes", False),
@@ -42,10 +42,10 @@ def render() -> None:
             **_widget_value("gl_leads", ""),
         )
         min_comments = st.number_input("Мин. комментариев", min_value=0, step=1, key="gl_min_comments")
-        fix_pattern = st.text_input(
+        mrr_pattern = st.text_input(
             "Регулярное выражение MRR",
             key="gl_pattern",
-            **_widget_value("gl_pattern", DEFAULT_FIX_PATTERN),
+            **_widget_value("gl_pattern", DEFAULT_MRR_PATTERN),
         )
         anonymize = st.checkbox("Анонимизировать примеры", key="gl_anon", **_widget_value("gl_anon", False))
         anonymize_urls = st.checkbox("И URL", key="gl_anon_url", **_widget_value("gl_anon_url", False))
@@ -80,7 +80,7 @@ def render() -> None:
             reviewer=reviewer,
             since=since,
             until=until,
-            linked_only=fixes_only,
+            linked_only=linked_only,
             min_comments=int(min_comments or 0),
         )
         labels = {
@@ -101,10 +101,10 @@ def render() -> None:
                     stats = process_store(
                         store,
                         targets,
-                        fix_pattern=fix_pattern or DEFAULT_FIX_PATTERN,
+                        mrr_pattern=mrr_pattern or DEFAULT_MRR_PATTERN,
                         anonymize=anonymize,
                         anonymize_urls=anonymize_urls,
-                        signal_config=_signal_config(team_leads, fix_pattern),
+                        signal_config=_signal_config(team_leads, mrr_pattern),
                     )
                     st.success(f"Примеров: {stats['examples']}")
                     st.rerun()
@@ -133,7 +133,7 @@ def render() -> None:
             store,
             summary,
             reviewer or None,
-            fix_pattern or DEFAULT_FIX_PATTERN,
+            mrr_pattern or DEFAULT_MRR_PATTERN,
             anonymize,
             anonymize_urls,
         )
@@ -141,7 +141,7 @@ def render() -> None:
         store.close()
 
 
-def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_pattern: str, anonymize: bool, anonymize_urls: bool) -> None:
+def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, mrr_pattern: str, anonymize: bool, anonymize_urls: bool) -> None:
     project_id = summary["project_id"]
     iid = summary["iid"]
     bundle = store.load_bundle(project_id, iid)
@@ -166,7 +166,7 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
         st.markdown("**Описание**")
         st.text(description[:4000])
 
-    _render_timeline(bundle, _signal_config(st.session_state.get("gl_leads", ""), fix_pattern))
+    _render_timeline(bundle, _signal_config(st.session_state.get("gl_leads", ""), mrr_pattern))
 
     traces = [
         trace
@@ -178,7 +178,7 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
         st.markdown("**Цепочка: комментарий → якорь → фикс → код**")
         for trace in traces:
             st.caption(f"ревьюер {trace.get('reviewer') or trace.get('author_username') or '—'}")
-            _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymize_urls)
+            _render_trace(store, summary, bundle, trace, mrr_pattern, anonymize, anonymize_urls)
     else:
         st.markdown("**Комментарии**")
         from scripts.ingest.gitlab.link import flatten_notes
@@ -193,10 +193,10 @@ def _render_mr(store: GitlabStore, summary: dict, reviewer: str | None, fix_patt
         process_store(
             store,
             [summary["ref"]],
-            fix_pattern=fix_pattern,
+            mrr_pattern=mrr_pattern,
             anonymize=anonymize,
             anonymize_urls=anonymize_urls,
-            signal_config=_signal_config(st.session_state.get("gl_leads", ""), fix_pattern),
+            signal_config=_signal_config(st.session_state.get("gl_leads", ""), mrr_pattern),
         )
         st.rerun()
 
@@ -226,7 +226,7 @@ def _signal_config(team_leads: str, pattern: str):
     from scripts.ingest.gitlab.signals import load_signal_config
 
     leads = [part.strip() for part in (team_leads or "").split(",") if part.strip()]
-    return load_signal_config(team_leads=leads, mrr_pattern=pattern or DEFAULT_FIX_PATTERN)
+    return load_signal_config(team_leads=leads, mrr_pattern=pattern or DEFAULT_MRR_PATTERN)
 
 
 def _render_timeline(bundle: dict, config) -> None:
@@ -325,7 +325,7 @@ def _render_stats(stats: dict, title: str) -> None:
         )
 
 
-def _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymize_urls) -> None:
+def _render_trace(store, summary, bundle, trace, mrr_pattern, anonymize, anonymize_urls) -> None:
     from scripts.ingest.gitlab.link import parse_hunks
 
     anchor = trace.get("anchor") or {}
@@ -390,10 +390,10 @@ def _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymi
             process_store(
                 store,
                 [summary["ref"]],
-                fix_pattern=fix_pattern,
+                mrr_pattern=mrr_pattern,
                 anonymize=anonymize,
                 anonymize_urls=anonymize_urls,
-                signal_config=_signal_config(st.session_state.get("gl_leads", ""), fix_pattern),
+                signal_config=_signal_config(st.session_state.get("gl_leads", ""), mrr_pattern),
             )
             st.rerun()
         if b2.button("Не исправлено", key=f"ov_none_{note_id}"):
@@ -401,10 +401,10 @@ def _render_trace(store, summary, bundle, trace, fix_pattern, anonymize, anonymi
             process_store(
                 store,
                 [summary["ref"]],
-                fix_pattern=fix_pattern,
+                mrr_pattern=mrr_pattern,
                 anonymize=anonymize,
                 anonymize_urls=anonymize_urls,
-                signal_config=_signal_config(st.session_state.get("gl_leads", ""), fix_pattern),
+                signal_config=_signal_config(st.session_state.get("gl_leads", ""), mrr_pattern),
             )
             st.rerun()
     st.markdown("---")
