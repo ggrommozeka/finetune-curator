@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts.build_dataset import main as build_finetune
 from scripts.export_approved import main as export_sessions
 from scripts.export_gitlab_mrr import main as export_gitlab
 from scripts.export_rules import main as export_rules
@@ -34,7 +35,7 @@ def render() -> None:
     )
     markdown = st.text_input("Rules Markdown", value="data/approved_rules.md")
     payload = st.text_input("Rules JSON", value="data/approved_rules.json")
-    skills = st.text_input("Skills dir", value="skills")
+    skills = st.text_input("Skills dir", value="data/skills")
     gitlab_store = st.text_input("GitLab store", value=st.session_state.get("cfg_gitlab", "data/gitlab"))
     gitlab_sft = st.text_input("GitLab SFT", value="data/gitlab_sft.jsonl")
     gitlab_dpo = st.text_input("GitLab DPO", value="data/gitlab_dpo.jsonl")
@@ -72,6 +73,72 @@ def render() -> None:
             st.error(str(exc) or "export failed")
         else:
             st.success(f"{gitlab_sft} · {gitlab_dpo}")
+    st.markdown("#### Датасеты для обучения")
+    st.caption(
+        "Автор — Qwen/Qwen3.8-27B, шаблон qwen3.8, до 32k токенов. "
+        "Ревью — отдельный датасет для модели ~9B. Эти два набора не смешиваются."
+    )
+    dataset_task = st.selectbox("Задача", ["author", "agentic", "style", "review"], key="finetune_task")
+    chat_template = st.selectbox(
+        "Chat template",
+        ["qwen3.8", "qwen3", "qwen3.5", "chatml", "llama3", "gemma"],
+        key="finetune_template",
+    )
+    base_default = "Qwen/Qwen3.5-9B" if dataset_task == "review" else "Qwen/Qwen3.8-27B"
+    base_model = st.text_input("Base model", value=base_default, key=f"finetune_base_{dataset_task}")
+    output_dir = st.text_input("Output dir", value=f"data/finetune/{dataset_task}", key=f"finetune_dir_{dataset_task}")
+    token_default = 8192 if dataset_task == "review" else 32000
+    max_tokens = st.number_input(
+        "Макс. токенов",
+        min_value=256,
+        value=token_default,
+        step=256,
+        key=f"finetune_tokens_{dataset_task}",
+    )
+    context_lines = st.number_input(
+        "Строк контекста вокруг комментария",
+        min_value=1,
+        value=20,
+        step=1,
+        key="finetune_context_lines",
+    )
+    eval_ratio = st.slider("Held-out", 0.0, 0.5, 0.1, 0.05)
+    anonymize = st.checkbox("Анонимизировать датасет", value=False)
+    keep_thinking = st.checkbox("Оставить блоки <think>", value=False)
+    if st.button("Собрать датасет"):
+        argv = [
+            "--input",
+            input_path,
+            "--decisions",
+            decisions,
+            "--gitlab-store",
+            gitlab_store,
+            "--patterns-store",
+            st.session_state.get("cfg_patterns", "data/patterns"),
+            "--output-dir",
+            output_dir,
+            "--task",
+            dataset_task,
+            "--chat-template",
+            chat_template,
+            "--base-model",
+            base_model,
+            "--max-tokens",
+            str(int(max_tokens)),
+            "--review-context-lines",
+            str(int(context_lines)),
+            "--eval-ratio",
+            str(eval_ratio),
+        ]
+        if anonymize:
+            argv.append("--anonymize")
+        argv.extend(["--thinking", "keep" if keep_thinking else "strip"])
+        try:
+            build_finetune(argv)
+        except SystemExit as exc:
+            st.error(str(exc) or "build failed")
+        else:
+            st.success(output_dir)
 
 
 render()

@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.gitlab.anonymize import Anonymizer
-from scripts.gitlab.client import (
+from scripts.ingest.gitlab.anonymize import Anonymizer
+from scripts.ingest.gitlab.client import (
     FixtureTransport,
     GitLabClient,
     GitLabError,
@@ -19,17 +19,17 @@ from scripts.gitlab.client import (
     merge_request_path,
     redact,
 )
-from scripts.gitlab.examples import sft_to_dpo
-from scripts.gitlab.export import export_records
-from scripts.gitlab.link import (
+from scripts.ingest.gitlab.examples import sft_to_dpo
+from scripts.ingest.gitlab.export import export_records
+from scripts.ingest.gitlab.link import (
     comment_target,
     link_comment,
     parse_hunks,
     parse_user_time,
 )
-from scripts.gitlab.store import GitlabStore
-from scripts.gitlab.sync import process_store, sync_store
-from scripts.rules.sessions import render_session, select_sessions
+from scripts.ingest.gitlab.store import GitlabStore
+from scripts.ingest.gitlab.sync import process_store, sync_store
+from scripts.ingest.opencode_sessions import render_session, select_sessions
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "gitlab_api.json"
@@ -105,7 +105,7 @@ def test_pagination_rate_limit_and_cache(tmp_path: Path):
 
 
 def test_line_movement_and_non_fix_commits():
-    from scripts.gitlab.trace import map_line, map_range, trace_thread
+    from scripts.ingest.gitlab.trace import map_line, map_range, trace_thread
 
     shifted, touched, _hunk = map_line(12, parse_hunks("@@ -1,0 +1,2 @@\n+added\n+lines\n"))
     assert shifted == 14
@@ -143,7 +143,7 @@ def test_line_movement_and_non_fix_commits():
 
 
 def test_link_file_line_then_file_then_mr():
-    from scripts.gitlab.signals import is_mrr_title
+    from scripts.ingest.gitlab.signals import is_mrr_title
 
     assert is_mrr_title("MRR fixes: rename")
     assert not is_mrr_title("rename helper")
@@ -254,9 +254,9 @@ def test_export_fixture_anonymizes_and_builds_dpo(tmp_path: Path):
 
 
 def test_comment_fix_and_team_lead_polish_are_separate():
-    from scripts.gitlab.classify import classify_commits
-    from scripts.gitlab.polish import build_polish_records
-    from scripts.gitlab.signals import SignalConfig, is_mrr_title
+    from scripts.ingest.gitlab.classify import classify_commits
+    from scripts.ingest.gitlab.polish import build_polish_records
+    from scripts.ingest.gitlab.signals import SignalConfig, is_mrr_title
 
     assert is_mrr_title("MRR fixes: rename")
     assert is_mrr_title("mrr: tighten")
@@ -294,7 +294,7 @@ def test_comment_fix_and_team_lead_polish_are_separate():
 
 
 def test_one_team_lead_and_every_reviewer(tmp_path: Path):
-    from scripts.gitlab.signals import SignalConfig, load_signal_config
+    from scripts.ingest.gitlab.signals import SignalConfig, load_signal_config
 
     config_path = tmp_path / "gitlab.json"
     config_path.write_text(
@@ -571,7 +571,7 @@ def test_cli_fixture_does_not_leak_token(tmp_path: Path):
 
 
 def test_nested_project_path_and_refresh_ref(tmp_path: Path):
-    from scripts.gitlab.sync import _path_from_web
+    from scripts.ingest.gitlab.sync import _path_from_web
 
     web = "https://gitlab.example.com/group/nested/app/-/merge_requests/7"
     assert _path_from_web({"web_url": web}) == "group/nested/app"
@@ -634,7 +634,7 @@ def test_list_counts_linked_traces_separately_from_mrr(tmp_path: Path):
 
 
 def test_linked_issues_from_title_and_other_project(tmp_path: Path, caplog):
-    from scripts.gitlab.sync import fetch_bundle, linked_issue_refs
+    from scripts.ingest.gitlab.sync import fetch_bundle, linked_issue_refs
 
     assert linked_issue_refs("See other/app#3", "Also #4 and issues/9") == [
         ("other/app", "3"),
@@ -691,8 +691,8 @@ def test_linked_issues_from_title_and_other_project(tmp_path: Path, caplog):
 
 
 def test_team_lead_mrr_commit_is_not_a_comment_fix():
-    from scripts.gitlab.export import records_from_bundle
-    from scripts.gitlab.signals import SignalConfig
+    from scripts.ingest.gitlab.export import records_from_bundle
+    from scripts.ingest.gitlab.signals import SignalConfig
 
     mr = {
         "project_id": 1,
@@ -740,7 +740,7 @@ def test_team_lead_mrr_commit_is_not_a_comment_fix():
 
 
 def test_issue_url_keeps_its_project():
-    from scripts.gitlab.sync import linked_issue_refs
+    from scripts.ingest.gitlab.sync import linked_issue_refs
 
     refs = linked_issue_refs("See https://gitlab.example.com/grp/sub/proj/-/issues/5 and #2")
     assert ("grp/sub/proj", "5") in refs

@@ -15,11 +15,11 @@ import os
 import sys
 from pathlib import Path
 
-from scripts.gitlab.client import FixtureTransport, GitLabClient, GitLabError
-from scripts.gitlab.examples import sft_to_dpo
-from scripts.gitlab.link import parse_user_time
-from scripts.gitlab.store import GitlabStore, parse_mr_ref
-from scripts.gitlab.sync import process_store, sync_store
+from scripts.ingest.gitlab.client import FixtureTransport, GitLabClient, GitLabError
+from scripts.ingest.gitlab.examples import sft_to_dpo
+from scripts.ingest.gitlab.link import parse_user_time
+from scripts.ingest.gitlab.store import GitlabStore, parse_mr_ref
+from scripts.ingest.gitlab.sync import process_store, sync_store
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -170,9 +170,9 @@ def _propose(records: list[dict], args) -> None:
     if not records:
         print("No examples to propose rules from.")
         return
-    from scripts.rules.llm import chat_complete, thinking_controls
-    from scripts.rules.propose import propose_rules
-    from scripts.rules.store import upsert_proposals
+    from scripts.llm.client import chat_complete, thinking_controls
+    from scripts.proposals.propose import propose_rules
+    from scripts.proposals.store import upsert_proposals
 
     if args.mock_response:
         raw = Path(args.mock_response).read_text(encoding="utf-8")
@@ -183,19 +183,9 @@ def _propose(records: list[dict], args) -> None:
         model = "mock"
         base_url = None
     else:
-        import argparse
+        from scripts.propose_rules import resolve_cli_endpoint
 
-        from scripts.propose_rules import _resolve
-
-        endpoint = _resolve(
-            argparse.Namespace(
-                base_url=None,
-                api_key=None,
-                model=None,
-                from_opencode=None,
-                opencode_config=None,
-            )
-        )
+        endpoint = resolve_cli_endpoint()
         if not endpoint.model:
             raise SystemExit(
                 "Set FINETUNE_CURATOR_MODEL or OPENAI_MODEL for --rules, or pass --mock-response."
@@ -260,7 +250,7 @@ def _cmd_sync(args) -> None:
 
 
 def _signals(args):
-    from scripts.gitlab.signals import load_signal_config
+    from scripts.ingest.gitlab.signals import load_signal_config
 
     return load_signal_config(getattr(args, "config", None), team_leads=args.team_lead, mrr_pattern=args.mrr_pattern)
 
@@ -297,13 +287,10 @@ def _polish_fn(args):
     if args.mock_response:
         raw = Path(args.mock_response).read_text(encoding="utf-8")
         return lambda _messages: raw
-    from scripts.rules.llm import chat_complete, thinking_controls
-    from scripts.propose_rules import _resolve
-    import argparse
+    from scripts.llm.client import chat_complete, thinking_controls
+    from scripts.propose_rules import resolve_cli_endpoint
 
-    endpoint = _resolve(
-        argparse.Namespace(base_url=None, api_key=None, model=None, from_opencode=None, opencode_config=None)
-    )
+    endpoint = resolve_cli_endpoint()
     if not endpoint.model:
         raise SystemExit("Set FINETUNE_CURATOR_MODEL or pass --mock-response with --summarize-polish.")
     _suffix, extra = thinking_controls(True)

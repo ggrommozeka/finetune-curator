@@ -1,0 +1,43 @@
+{
+  "profile": "reviewer-bf16-2x16gb",
+  "target": "reviewer",
+  "base_model": "Qwen/Qwen3.5-9B",
+  "base_model_candidates": [
+    "Qwen/Qwen3.5-9B",
+    "deepreinforce-ai/Ornith-1.0-9B"
+  ],
+  "chat_template": "qwen3",
+  "hardware": {
+    "machine": "local",
+    "gpus": ["RTX 5060 Ti 16GB", "RTX 5060 Ti 16GB"],
+    "gpu_count": 2,
+    "nvlink": false,
+    "system_ram_gb": 80
+  },
+  "training": {
+    "precision": "bf16-lora",
+    "load_in_4bit": false,
+    "load_in_16bit": true,
+    "full_finetuning": false,
+    "device_map": "balanced",
+    "launcher": "one process, not torchrun",
+    "cpu_offload": false,
+    "max_seq_length": 8192,
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "gradient_checkpointing": "unsloth",
+    "learning_rate": 0.0002,
+    "lora_r": 16,
+    "lora_alpha": 16
+  },
+  "dataset": {
+    "task": "review",
+    "max_tokens": 8192,
+    "review_context_lines": 20
+  },
+  "notes": [
+    "Unsloth bf16 LoRA for Qwen3.5-9B is about 22GB, which does not fit on one 16GB card. device_map=balanced shards the model across both GPUs in a single process.",
+    "Do not launch this profile with torchrun or accelerate DDP. DDP keeps a full copy on every GPU, and Unsloth rejects device_map=balanced inside distributed mode.",
+    "The cards are not NVLink-connected. Sharding still works over PCIe and is slower. If either GPU runs out of memory, lower max_seq_length. Do not move layers to CPU."
+  ]
+}

@@ -5,21 +5,21 @@ from pathlib import Path
 
 import pytest
 
-from scripts.rules.endpoint import (
+from scripts.llm.endpoint import (
     EndpointError,
     format_endpoint,
     normalize_base_url,
     pick_remote_model,
     resolve_endpoint,
 )
-from scripts.rules.opencode_config import (
+from scripts.llm.opencode_config import (
     deep_merge,
     discover_config_files,
     load_merged_config,
     parse_config_file,
     resolve_model_ref,
 )
-from scripts.rules.sessions import (
+from scripts.ingest.opencode_sessions import (
     build_transcripts,
     chunk_blocks,
     estimate_tokens,

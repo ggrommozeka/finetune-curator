@@ -6,10 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-from scripts.rules.export import export_approved, export_skills, render_markdown
 from scripts.export_opencode import scored_sibling, stamp_machine
-from scripts.rules.propose import propose_rules
-from scripts.rules.store import (
+from scripts.proposals.export import export_approved, export_skills, render_markdown
+from scripts.proposals.propose import propose_rules
+from scripts.proposals.store import (
     approved_rules,
     load_proposals,
     load_rule_decisions,
@@ -430,8 +430,8 @@ def test_stamp_machine_keeps_logminer_score(tmp_path: Path):
 
 
 def test_legacy_rules_file_becomes_per_session_and_approved_survives(tmp_path: Path):
-    from scripts.rules.export import export_approved
-    from scripts.rules.store import public_rule
+    from scripts.proposals.export import export_approved
+    from scripts.proposals.store import public_rule
 
     path = tmp_path / "rule_proposals.json"
     path.write_text(

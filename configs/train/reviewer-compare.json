@@ -1,0 +1,12 @@
+[
+  {
+    "name": "qwen3.5-9b-base",
+    "base_url": "http://127.0.0.1:8080/v1",
+    "model": "Qwen3.5-9B"
+  },
+  {
+    "name": "qwen3.5-9b-qlora",
+    "base_url": "http://127.0.0.1:8081/v1",
+    "model": "Qwen3.5-9B-review-qlora"
+  }
+]

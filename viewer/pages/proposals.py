@@ -11,10 +11,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.catalog import Catalog
-from scripts.rules.merge import CATEGORIES
-from scripts.rules.sessions import first_user_preview, load_jsonl, load_review_decisions, normalize_messages, session_id
-from scripts.rules.store import effective_proposals, load_proposals, load_rule_decisions, save_rule_decisions
+from scripts.ingest.catalog import Catalog
+from scripts.proposals.merge import CATEGORIES
+from scripts.ingest.opencode_sessions import first_user_preview, load_jsonl, load_review_decisions, normalize_messages, session_id
+from scripts.proposals.store import effective_proposals, load_proposals, load_rule_decisions, save_rule_decisions
 from shared import esc, open_evidence, status_pill, widget_value
 
 
@@ -164,7 +164,7 @@ def _render_clusters() -> None:
     root = Path(st.session_state.get("cfg_patterns", "data/patterns"))
     if not (root / "store.db").exists():
         return
-    from scripts.patterns.store import PatternStore
+    from scripts.analysis.store import PatternStore
 
     store = PatternStore(root)
     try:
