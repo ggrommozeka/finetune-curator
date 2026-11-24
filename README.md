@@ -52,24 +52,20 @@ flowchart TD
 
 Границы, к которым сходится код: `ingest` (OpenCode и GitLab), `llm` (общий клиент), `analysis` (кластеры), `proposals` (один файл предложений), `datasets`, `training`, `viewer`. На этой ветке клиент, предложения и просмотр сессий лежат в `scripts/rules`, `scripts/export_opencode.py` и `viewer/`.
 
-## What this branch does
+## Что уже есть на этой ветке
 
-Pipeline: **LogMiner export → visual review (keep/discard) → export only approved** for Unsloth / SFT.
+Выгрузка LogMiner, ручной просмотр Keep/Discard и экспорт только одобренных сессий. Тот же просмотр предлагает правила для системного промпта или `AGENTS.md`: ошибки, правки пользователя, циклы, неверные инструменты.
 
-The same review pass can mine a second artifact: **harness rules** for the agent system prompt or `AGENTS.md` (mistakes, user corrections, loops, tool misuse).
+Источники LogMiner: OpenCode, Claude Code, Cline, Codex, Qwen.
 
-Works with OpenCode (and other LogMiner sources: Claude Code, Cline, Codex, Qwen).
+1. **Выгрузка** — тонкая обёртка над [LogMiner](https://github.com/pearsonkyle/LogMiner).
+2. **Одно приложение Streamlit** — `streamlit run viewer/app.py`. Общие пути: сессии OpenCode, предложения правил и навыков, экспорт. Страницы GitLab и мониторинга подключаются следующими изменениями.
+3. **Экспорт одобренных сессий** — JSONL только с Keep, для Unsloth.
+4. **Предложения** — один список (`kind`: rule или skill, текст, сессии-источники, статус, `mode`). Сейчас режим `per-session`. Позже корпус пишет в тот же файл и ту же страницу одобрения.
 
-## What you get
+Старый файл `{"rules":[...]}` без поля `mode` читается как черновики `per-session`. Предложение с `source: gitlab` так не помечается. Одобренное предложение не удаляется, когда корпус вычищает черновики.
 
-1. **Export** — thin wrapper around [LogMiner](https://github.com/pearsonkyle/LogMiner) for OpenCode history
-2. **One Streamlit app** — `streamlit run viewer/app.py`. Pages share navigation and paths: OpenCode sessions, proposals (rules and skills), and export. GitLab and monitoring pages plug into the same app.
-3. **Export approved** — writes only kept sessions to a clean JSONL ready for Unsloth
-4. **Proposals** — one shared list (`kind`: rule or skill, text, source session ids, status). A first version proposes rules from individual sessions. Later corpus mining writes the same file, and the same viewer page approves both.
-
-The dataset flow is unchanged. Rule files are a separate output.
-
-## Install
+## Установка
 
 ```bash
 python -m venv .venv
@@ -80,30 +76,30 @@ pip install -r requirements.txt
 pip install "git+https://github.com/pearsonkyle/LogMiner.git"
 ```
 
-## Quick start
+## Быстрый старт
 
-### 1. Export from OpenCode
+### 1. Выгрузить OpenCode
 
 ```bash
-# Keep all scores for manual review
+# Все оценки, чтобы просмотреть вручную
 python -m scripts.export_opencode --output data/raw_scored.jsonl --min-score 0.0 --machine laptop-a
 ```
 
-OpenCode data is read from `~/.local/share/opencode` by default (override with `--input`).
+По умолчанию OpenCode читается из `~/.local/share/opencode`. Другой путь: `--input`. `--machine` пишет метку на каждую строку и не затирает оценку LogMiner. Рядом ищется только scored-файл этого же экспорта, не чужой `*_scored.jsonl`.
 
-### 2. Review in the viewer
+### 2. Просмотр в интерфейсе
 
 ```bash
 streamlit run viewer/app.py -- --input data/raw_scored.jsonl
 ```
 
-- Filter by score / label
-- Open each trajectory (user / assistant / tool turns)
-- Press **Keep** or **Discard**
-- Optional note per session (why it failed, what the user corrected)
-- Decisions are saved to `data/decisions.json`
+- Фильтр по оценке и метке
+- Траектория: пользователь, ассистент, инструменты
+- **Keep** или **Discard**
+- Заметка, почему сессия не удалась или что поправил пользователь
+- Решения пишутся в `data/decisions.json`
 
-### 3. Export only approved sessions
+### 3. Экспорт только одобренных сессий
 
 ```bash
 python -m scripts.export_approved \
@@ -112,7 +108,7 @@ python -m scripts.export_approved \
   --output data/approved.jsonl
 ```
 
-Load into Unsloth / HuggingFace:
+Загрузка в Unsloth / HuggingFace:
 
 ```python
 from datasets import load_dataset
@@ -122,17 +118,17 @@ ds = load_dataset("json", data_files="data/approved.jsonl", split="train")
 msgs = [json.loads(m) for m in ds[0]["messages"]]
 ```
 
-### 4. Propose harness rules
+### 4. Предложить правила
 
-Rules are drafted from sessions you discarded, sessions under `--max-score` (default `0.6`, plus LogMiner labels `bad` / `maybe`), and any session with a reviewer note. Each rule is a short imperative instruction, with a category, rationale, source session ids, and a short evidence excerpt. Similar rules are merged.
+Черновики берутся из сессий Discard, сессий с оценкой не выше `--max-score` (по умолчанию `0.6`, плюс метки LogMiner `bad` / `maybe`) и сессий с заметкой. Правило — короткая императивная инструкция: категория, обоснование, id сессий, короткая цитата. Похожие формулировки сливаются. У каждого предложения `mode: per-session`.
 
-Any OpenAI-compatible chat API works. The default endpoint is a local [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`:
+Подойдёт любой OpenAI-совместимый chat API. По умолчанию локальный [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`:
 
 ```text
 http://localhost:8080/v1
 ```
 
-The API key is optional there. If you omit `--model`, the script uses the only id returned by `GET /v1/models`.
+Ключ там необязателен. Если `--model` не задан, берётся единственный id из `GET /v1/models`.
 
 ```bash
 python -m scripts.propose_rules \
@@ -143,7 +139,7 @@ python -m scripts.propose_rules \
   --context-budget 170000
 ```
 
-Smoke-test the command without a server (canned reply, no network):
+Проверка без сервера, готовый ответ, без сети:
 
 ```bash
 python -m scripts.propose_rules \
@@ -153,14 +149,14 @@ python -m scripts.propose_rules \
   --mock-response tests/fixtures/sample_rules_response.txt
 ```
 
-### 5. Approve rules in the viewer
+### 5. Одобрить правила
 
-Open the viewer as in step 2 and switch the sidebar to **Правила**.
+Откройте просмотр из шага 2 и перейдите на страницу **Правила**.
 
-- Edit the rule text and category
+- Правьте текст и категорию
 - **Одобрить** / **Отклонить**
-- Session buttons jump back to the source trajectory
-- Decisions are saved to `data/rule_decisions.json` (proposals stay in `data/rule_proposals.json`)
+- Кнопка сессии возвращает к траектории
+- Решения — в `data/rule_decisions.json`, предложения остаются в `data/rule_proposals.json`
 
 ```bash
 streamlit run viewer/app.py -- \
@@ -170,9 +166,9 @@ streamlit run viewer/app.py -- \
   --rule-decisions data/rule_decisions.json
 ```
 
-### 6. Export approved rules
+### 6. Экспорт одобренных правил
 
-Markdown is grouped by category and ready to paste into a system prompt or `AGENTS.md`. JSON keeps ids, text, category, rationale, source session ids, and evidence. Only **approved** rules are written; edited text wins.
+Markdown сгруппирован по категориям и готов в системный промпт или `AGENTS.md`. JSON хранит id, текст, категорию, обоснование, сессии, цитату и `mode`. Пишутся только **одобренные** правила. Отредактированный текст побеждает.
 
 ```bash
 python -m scripts.export_rules \
@@ -182,13 +178,13 @@ python -m scripts.export_rules \
   --json data/approved_rules.json
 ```
 
-## Local llama.cpp
+## Локальный llama.cpp
 
-The defaults assume a server with about **200k** tokens of context. `--context-budget` (default **170000**) is the usable input budget, leaving room for the instruction prompt and the JSON answer (`--max-output-tokens`, default 4096). Typical OpenCode sessions are sent whole. A session that does not fit is split on message boundaries; short sessions are packed into one request. Lower the budget if `llama-server` was started with a smaller `-c` (for example `--context-budget 12000` on a 16k server).
+По умолчанию сервер с контекстом около **200k** токенов. `--context-budget` (по умолчанию **170000**) — бюджет входа: место остаётся на инструкцию и JSON-ответ (`--max-output-tokens`, по умолчанию 4096). Обычная сессия OpenCode уходит целиком. Если не влезает, режется по границам сообщений. Короткие сессии пакуются в один запрос. Уменьшите бюджет, если `llama-server` запущен с меньшим `-c` (например `--context-budget 12000` на сервере 16k).
 
-Token counts are estimated as `characters / --chars-per-token` (default `3`, which over-counts English and stays inside the window). If the server reports a context overflow, lower `--chars-per-token`. Pass `--no-batch` to send every chunk in its own request.
+Оценка длины — `символы / --chars-per-token` (по умолчанию `3`: для английского с запасом). Если сервер сообщает о переполнении контекста, уменьшите `--chars-per-token`. `--no-batch` шлёт каждый кусок отдельно.
 
-Qwen3-family GGUF quants (for example an Unsloth Q5_K_XL around 27B) emit a `<think>` block unless thinking is disabled. By default this script appends `/no_think` and sends `chat_template_kwargs.enable_thinking=false`. Replies are still scanned and `<think>…</think>` is stripped before JSON parsing. Invalid JSON is retried (`--attempts`, default 3). Temperature defaults to `0.1`. Pass `--think` to allow thinking, or `--no-template-kwargs` if a server rejects the extra body field. The model id is never hardcoded.
+Кванты GGUF семейства Qwen3 (например Unsloth Q5_K_XL около 27B) пишут блок `<think>`, пока рассуждение не выключено. Скрипт добавляет `/no_think` и `chat_template_kwargs.enable_thinking=false`. Перед разбором JSON теги `<think>…</think>` всё равно вырезаются. Плохой JSON повторяется (`--attempts`, по умолчанию 3). Температура `0.1`. `--think` оставляет рассуждение. `--no-template-kwargs` убирает дополнительное поле, если сервер его отвергает. Имя модели в коде не зашито.
 
 ```bash
 llama-server \
@@ -206,18 +202,18 @@ python -m scripts.propose_rules \
   --context-budget 170000
 ```
 
-`--jinja` lets llama.cpp apply the GGUF chat template, which is what honors `/no_think` and `enable_thinking`. Check the loaded id with:
+`--jinja` включает шаблон чата из GGUF. Без него `/no_think` и `enable_thinking` не сработают. Проверка id:
 
 ```bash
 curl -s http://127.0.0.1:8080/v1/models
 python -m scripts.propose_rules --list-models --base-url http://127.0.0.1:8080/v1
 ```
 
-Pin it with `--model <id>` when the server exposes more than one.
+Если сервер отдаёт несколько id, закрепите `--model <id>`.
 
-## OpenCode provider config
+## Конфиг провайдера OpenCode
 
-If the model is already configured for OpenCode, pick it by `provider/model`. Project `opencode.json` / `opencode.jsonc` (including `.opencode/`) overrides `~/.config/opencode/opencode.json`. Both the current `providers.*.settings.baseURL` shape and the older `provider.*.options.baseURL` shape are read. `modelID` is what is sent to the API. Keys come from `apiKey` / `api_key` or the provider `env` list.
+Если модель уже настроена в OpenCode, выберите её как `provider/model`. Проектный `opencode.json` / `opencode.jsonc` (включая `.opencode/`) важнее `~/.config/opencode/opencode.json`. Читаются и текущий вид `providers.*.settings.baseURL`, и старый `provider.*.options.baseURL`. В API уходит `modelID`. Ключ берётся из `apiKey` / `api_key` или списка `env` провайдера.
 
 ```bash
 python -m scripts.propose_rules --list-opencode-models
@@ -229,17 +225,17 @@ python -m scripts.propose_rules \
   --from-opencode llama/qwen3-27b
 ```
 
-Override order, highest first: CLI flags (`--base-url`, `--api-key`, `--model`), then `FINETUNE_CURATOR_BASE_URL` / `FINETUNE_CURATOR_API_KEY` / `FINETUNE_CURATOR_MODEL`, then `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`, then the OpenCode entry, then the llama-server default base URL. A base URL with no path gets `/v1` appended.
+Порядок, от сильного к слабому: флаги `--base-url`, `--api-key`, `--model`, затем `FINETUNE_CURATOR_BASE_URL` / `FINETUNE_CURATOR_API_KEY` / `FINETUNE_CURATOR_MODEL`, затем `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`, затем запись OpenCode, затем адрес llama-server по умолчанию. У адреса без пути дописывается `/v1`.
 
 ```bash
 export FINETUNE_CURATOR_BASE_URL=http://127.0.0.1:8080/v1
 export FINETUNE_CURATOR_MODEL=qwen3-27b-q5
-# FINETUNE_CURATOR_API_KEY is optional for llama-server
+# FINETUNE_CURATOR_API_KEY для llama-server можно не задавать
 ```
 
-`--print-endpoint` shows the resolved model and base URL and never prints the key.
+`--print-endpoint` показывает модель и адрес и не печатает ключ.
 
-## Layout
+## Каталог файлов
 
 ```
 finetune-curator/
@@ -247,33 +243,32 @@ finetune-curator/
 ├── requirements.txt
 ├── .gitignore
 ├── scripts/
-│   ├── export_opencode.py    # LogMiner wrapper
-│   ├── export_approved.py    # Keep-only JSONL export
-│   ├── propose_rules.py      # LLM rule proposals
-│   ├── export_rules.py       # Approved rules → Markdown + JSON
-│   └── rules/                # selection, merge, endpoint, export
+│   ├── export_opencode.py    # обёртка LogMiner
+│   ├── export_approved.py    # JSONL только Keep
+│   ├── propose_rules.py      # предложения правил
+│   ├── export_rules.py       # одобренные правила → Markdown + JSON
+│   └── rules/                # отбор, слияние, адрес модели, экспорт
 ├── viewer/
-│   ├── app.py                # Streamlit keep/discard + rules review
-│   └── rules_page.py
+│   └── app.py                # одно приложение Streamlit
 ├── tests/
-└── data/                     # local only (gitignored)
+└── data/                     # только локально
 ```
 
-## Tests
+## Тесты
 
 ```bash
 python -m pytest
 ```
 
-The suite covers merge, JSON parsing (thinking tags included), chunking and batching, decision files, both export formats, OpenCode config resolution, and a mocked end-to-end `propose_rules` → `export_rules` run. It does not call a live model.
+Покрыты слияние правил, JSON вместе с тегами рассуждения, нарезка длинных сессий, файлы решений, оба экспорта, разбор конфига OpenCode и цепочка `propose_rules` → `export_rules` на canned-ответе. Живая модель не вызывается.
 
-## Notes
+## Заметки
 
-- LogMiner quality score is a **structural filter**, not a success label. Always spot-check Keep decisions and approved rules.
-- After OpenCode CLI upgrades (v1 → v2 schema), re-run export; if parse fails, check `opencode --version` and DB tables.
-- Do not commit real session logs or exported rules if they may contain secrets. `data/*.jsonl`, `data/*.json`, and `data/*.md` are gitignored.
-- Rule ids are a hash of the category and the normalized text, so approving the same merged wording again keeps the decision. Editing text in the viewer does not change the id.
+- Оценка LogMiner — структурный фильтр, а не метка успеха. Просматривайте Keep и одобренные правила.
+- После обновления OpenCode (схема v1 → v2) пересоберите выгрузку. Если разбор падает, проверьте `opencode --version` и таблицы базы.
+- Не коммитьте реальные сессии и экспортированные правила: в них бывают секреты. `data/*.jsonl`, `data/*.json` и `data/*.md` в `.gitignore`.
+- Id правила — хеш категории и нормализованного текста. Повторное одобрение той же формулировки сохраняет решение. Правка текста в интерфейсе id не меняет.
 
-## License
+## Лицензия
 
 MIT

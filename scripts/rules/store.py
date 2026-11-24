@@ -57,7 +57,18 @@ def load_proposals(path: Path) -> dict:
         data = {"proposals": data}
     if not isinstance(data, dict):
         raise ValueError(f"{path} must be a JSON object")
-    data["proposals"] = [normalize_proposal(item) for item in _raw_items(data) if isinstance(item, dict) and item.get("id")]
+    legacy = "mode" not in data
+    document_mode = str(data.get("mode") or "")
+    proposals = []
+    for item in _raw_items(data):
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        proposal = normalize_proposal(item)
+        if not proposal["mode"] and proposal.get("source") != "gitlab":
+            if legacy or document_mode == "per-session":
+                proposal["mode"] = "per-session"
+        proposals.append(proposal)
+    data["proposals"] = proposals
     data["rules"] = [item for item in data["proposals"] if item["kind"] == "rule"]
     data.setdefault("version", 2)
     return data
@@ -172,19 +183,50 @@ def public_rule(rule: dict) -> dict:
         "session_ids": list(rule.get("session_ids") or []),
         "evidence": rule.get("evidence") or "",
         "source": rule.get("source") or "opencode",
+        "mode": rule.get("mode") or "",
     }
 
 
-def upsert_proposals(path: Path, new_items: list[dict], *, mode: str | None = None) -> dict:
-    """Merge proposals into the shared file by id. Decisions are left untouched."""
+def decisions_beside(proposals_path: Path) -> Path:
+    """``rule_proposals.json`` pairs with ``rule_decisions.json``."""
+    name = proposals_path.name
+    if "proposals" in name:
+        return proposals_path.with_name(name.replace("proposals", "decisions", 1))
+    return proposals_path.with_name("rule_decisions.json")
+
+
+def upsert_proposals(
+    path: Path,
+    new_items: list[dict],
+    *,
+    mode: str | None = None,
+    drop_modes: set[str] | None = None,
+    decisions_path: Path | None = None,
+) -> dict:
+    """Merge proposals into the shared file by id. Decisions are left untouched.
+
+    ``drop_modes`` removes drafts of those modes. Approved ids are kept even when
+    their mode is listed. A GitLab proposal is never stamped ``per-session``.
+    """
     document = load_proposals(path) if path.exists() else {"version": 2, "proposals": []}
-    by_id = {item["id"]: item for item in document.get("proposals") or []}
+    drop_modes = drop_modes or set()
+    approved = set()
+    decisions = load_rule_decisions(decisions_path or decisions_beside(path))
+    approved = {key for key, status in (decisions.get("statuses") or {}).items() if status == "approved"}
+    by_id = {}
+    for item in document.get("proposals") or []:
+        if item.get("mode") in drop_modes and item["id"] not in approved:
+            continue
+        by_id[item["id"]] = item
     for item in new_items:
         proposal = normalize_proposal(item)
         if not proposal["id"]:
             continue
-        if mode and by_id.get(proposal["id"], {}).get("mode") not in (None, mode) and proposal["id"] in by_id:
+        existing = by_id.get(proposal["id"])
+        if mode and existing and existing.get("mode") not in ("", mode) and existing.get("mode"):
             continue
+        if mode and not (proposal.get("source") == "gitlab" and mode == "per-session"):
+            proposal["mode"] = mode
         by_id[proposal["id"]] = proposal
     merged = {
         "version": 2,
