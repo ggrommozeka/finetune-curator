@@ -4,10 +4,36 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+
+def stamp_machine(path: Path, machine: str) -> int:
+    """Write ``machine`` onto each JSONL object. Scores and other fields stay."""
+    label = (machine or "").strip()
+    if not label or not path.is_file():
+        return 0
+    stamped = 0
+    lines_out: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            lines_out.append(line)
+            continue
+        if isinstance(row, dict):
+            row["machine"] = label
+            stamped += 1
+            lines_out.append(json.dumps(row, ensure_ascii=False))
+        else:
+            lines_out.append(line)
+    path.write_text("\n".join(lines_out) + ("\n" if lines_out else ""), encoding="utf-8")
+    return stamped
 
 
 def _which_logminer() -> list[str]:
@@ -70,6 +96,11 @@ def main() -> None:
         help="Stop after evaluate (write *_scored.jsonl style output via run still filters; "
         "use min-score 0 to keep almost everything)",
     )
+    p.add_argument(
+        "--machine",
+        default="",
+        help="Label written onto every exported row (for example laptop-a). Scores are kept.",
+    )
     args = p.parse_args()
 
     out = Path(args.output)
@@ -107,6 +138,11 @@ def main() -> None:
         )
         if candidates:
             scored = candidates[0]
+
+    if args.machine:
+        stamp_machine(out, args.machine)
+        if scored.exists() and scored.resolve() != out.resolve():
+            stamp_machine(scored, args.machine)
 
     print()
     print("Done.")

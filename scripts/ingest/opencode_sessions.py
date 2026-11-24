@@ -57,7 +57,7 @@ def load_review_decisions(path: Path) -> dict:
 
 
 def source_model_info(record: dict) -> dict:
-    """Provider and model that produced an OpenCode session, when the export recorded them."""
+    """Provider and model that produced a session, from the record or its messages."""
     provider = ""
     name = ""
     model = record.get("model")
@@ -74,16 +74,27 @@ def source_model_info(record: dict) -> dict:
         provider = str(record.get("provider") or record.get("providerID") or record.get("provider_id") or "")
     if not name:
         name = str(record.get("model_id") or record.get("modelID") or "")
-    info = record.get("info") if isinstance(record.get("info"), dict) else {}
-    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
-    for blob in (info, metadata):
+    blobs = []
+    for key in ("info", "metadata"):
+        blob = record.get(key)
+        if isinstance(blob, dict):
+            blobs.append(blob)
+    for message in record.get("messages") or []:
+        if isinstance(message, dict):
+            blobs.append(message)
+            if isinstance(message.get("info"), dict):
+                blobs.append(message["info"])
+    for blob in blobs:
         nested = blob.get("model")
         if isinstance(nested, dict):
             provider = provider or str(nested.get("providerID") or nested.get("provider") or "")
-            name = name or str(nested.get("modelID") or nested.get("id") or "")
+            name = name or str(nested.get("modelID") or nested.get("id") or nested.get("name") or "")
+        elif isinstance(nested, str) and "/" in nested and not (provider and name):
+            provider, name = nested.split("/", 1)
         elif isinstance(nested, str) and not name:
             name = nested
-        provider = provider or str(blob.get("provider") or "")
+        provider = provider or str(blob.get("providerID") or blob.get("provider") or "")
+        name = name or str(blob.get("modelID") or blob.get("model_id") or "")
     label = "/".join(part for part in (provider.strip(), name.strip()) if part)
     return {"provider": provider.strip(), "model": name.strip(), "label": label}
 
