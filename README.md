@@ -4,7 +4,7 @@
 
 Две модели:
 
-- **Модель A, автор кода, около 27B.** Базовый чекпоинт `Qwen/Qwen3.5-27B`. Учится на успешных траекториях OpenCode, на парах DPO из правок пользователя и на стиле проекта: полировка тимлида и правки после комментария ревьюера. В системный промпт и в `.opencode/skills` рядом с ней кладутся одобренные правила и навыки.
+- **Модель A, автор кода, около 27B.** Базовый чекпоинт `Qwen/Qwen3.8-27B` (архитектура Qwen3.5; шаблон `qwen3.8` совпадает с ChatML Qwen3). Идентификатор можно сменить флагом `--base-model`. Учится на успешных траекториях OpenCode, на парах DPO из правок пользователя и на стиле проекта: полировка тимлида и правки после комментария ревьюера. В системный промпт и в `.opencode/skills` рядом с ней кладутся одобренные правила и навыки.
 - **Модель B, ревьюер, около 9B.** Кандидаты: `Qwen/Qwen3.5-9B` (значение по умолчанию) и `deepreinforce-ai/Ornith-1.0-9B` (MIT). Сейчас это этап 1: модель видит уже собранный контекст (дифф, описание MR, связанные задачи, код на базовом коммите, определения символов, одобренные правила) и пишет комментарий. Агентное ревью с инструментами только на чтение — отдельная будущая задача и в этом репозитории не реализовано.
 
 Правила и навыки — третий результат, не третья модель. Правило — короткая императивная инструкция для системного промпта или `AGENTS.md`. Навык — пошаговый сценарий под один тип задачи в формате OpenCode `SKILL.md`. Оба живут в одном файле предложений и проходят одну страницу одобрения.
@@ -368,16 +368,16 @@ python -m scripts.export_rules \
   --decisions data/rule_decisions.json \
   --markdown data/approved_rules.md \
   --json data/approved_rules.json \
-  --skills-dir .opencode/skills
+  --skills-dir data/skills
 ```
 
-`mine_patterns export` вызывает тот же писатель и запоминает версию для отчёта и отката:
+`mine_patterns export` вызывает тот же писатель и запоминает версию для отчёта и отката. Каталог навыков по умолчанию — `data/skills`, он в `.gitignore`:
 
 ```bash
 python -m scripts.mine_patterns export \
   --rules-md data/patterns_rules.md \
   --rules-json data/patterns_rules.json \
-  --skills-dir .opencode/skills \
+  --skills-dir data/skills \
   --version v1
 ```
 
@@ -393,7 +393,7 @@ python -m scripts.mine_patterns export \
 - **style.** Коммиты тимлида (и MRR, и остальные) и пары «комментарий, потом правка». Вход — «перепиши по правилам проекта». Код до правки — `rejected`, после — `chosen`.
 - **review.** Ханк и комментарий любого ревьюера, плюс правка, если комментарий связан. Ханки без комментариев — негативные примеры, цель ровно `No issues.`
 
-`--task author` — это agentic и style для модели A. `--task review` — только модель B. `--task all` смешивает три задачи весами `--agentic`, `--style`, `--review`.
+`--task author` — это agentic и style для модели A. `--task review` — только модель B. Запуск без `--task` и без `--profile` пишет два каталога, `author/` и `review/`. Эти наборы не смешиваются: `--task all` делает то же разделение, а не один общий файл.
 
 Длина модели A по умолчанию 32000 токенов. Сессия длиннее режется по границам реплик; в каждом куске повторяются системный промпт и первое сообщение пользователя. `<think>` вырезается (`--thinking strip`). `--thinking keep` оставляет блоки: тогда и на инференсе рассуждение должно быть включено.
 
@@ -414,7 +414,7 @@ python -m scripts.build_dataset \
   --chat-template qwen3 \
   --thinking strip \
   --max-tokens 32000 \
-  --base-model Qwen/Qwen3.5-27B \
+  --base-model Qwen/Qwen3.8-27B \
   --source-model claude \
   --model-weight claude=3 \
   --anonymize --anonymize-urls
@@ -501,7 +501,7 @@ model = FastLanguageModel.get_peft_model(
 
 ```python
 model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name="Qwen/Qwen3.5-27B",
+    model_name="Qwen/Qwen3.8-27B",
     max_seq_length=32768,
     load_in_4bit=False,
     load_in_16bit=True,
@@ -790,8 +790,8 @@ finetune-curator/
 ├── gitlab.example.json          # образец тимлида и regex MRR
 ├── configs/train/               # профили 9B и 27B
 ├── scripts/
-│   ├── export_opencode.py
-│   ├── export_approved.py
+│   ├── export_opencode.py       # обёртка, код в ingest/
+│   ├── export_approved.py       # обёртка, код в proposals/
 │   ├── propose_rules.py
 │   ├── export_rules.py
 │   ├── export_gitlab_mrr.py

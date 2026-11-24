@@ -64,27 +64,53 @@ def called_names(diff: str) -> list[str]:
     return names[:8]
 
 
-def definitions_and_calls(content: str, names: list[str]) -> str:
-    if not content or not names:
+def definitions_and_calls(
+    content: str,
+    names: list[str],
+    other_files: list[tuple[str, str]] | None = None,
+) -> str:
+    """Find definitions and call sites in stored snapshots.
+
+    ``content`` is the file that changed, searched first. ``other_files`` are
+    other snapshots already stored for this merge request, as ``(path, text)``.
+    A name that is not defined in any of those snapshots is omitted. This does
+    not read the rest of the repository.
+    """
+    if not names:
         return ""
-    rows = content.splitlines()
+    sources: list[tuple[str, str]] = [("", content or "")]
+    for path, text in other_files or []:
+        if text and text != content:
+            sources.append((path, text))
     blocks = []
     for name in names:
         definition = ""
-        for match in _DEF.finditer(content):
-            if match.group("name") != name:
+        defined_in = ""
+        sites: list[str] = []
+        for path, text in sources:
+            if not text:
                 continue
-            start = content[: match.start()].count("\n")
-            definition = "\n".join(rows[start : start + 12])
-            break
-        sites = []
-        for index, row in enumerate(rows, 1):
-            if f"{name}(" in row and not row.strip().startswith(("def ", "class ", "function ", "func ", "fn ")):
-                sites.append(f"{index}: {row.strip()}")
-            if len(sites) >= 4:
+            rows = text.splitlines()
+            if not definition:
+                for match in _DEF.finditer(text):
+                    if match.group("name") != name:
+                        continue
+                    start = text[: match.start()].count("\n")
+                    definition = "\n".join(rows[start : start + 12])
+                    defined_in = path
+                    break
+            for index, row in enumerate(rows, 1):
+                if f"{name}(" in row and not row.strip().startswith(("def ", "class ", "function ", "func ", "fn ")):
+                    label = f"{path}:{index}" if path else str(index)
+                    sites.append(f"{label}: {row.strip()}")
+                if len(sites) >= 4:
+                    break
+            if len(sites) >= 4 and definition:
                 break
-        if definition or sites:
-            blocks.append(definition + ("\ncall sites:\n" + "\n".join(sites) if sites else ""))
+        if not definition and not sites:
+            continue
+        header = f"{defined_in}\n{definition}".strip() if defined_in else definition
+        blocks.append(header + ("\ncall sites:\n" + "\n".join(sites) if sites else ""))
     return "\n\n".join(block for block in blocks if block.strip())
 
 
@@ -124,13 +150,14 @@ def review_context(
     conventions: str,
     max_tokens: int,
     chars_per_token: float = 3.0,
+    other_files: list[tuple[str, str]] | None = None,
 ) -> str:
     issue_text = "\n\n".join(
         f"#{item.get('iid')} {item.get('title') or ''}\n{item.get('description') or ''}".strip()
         for item in issues or []
         if (item.get("title") or item.get("description"))
     )
-    symbols = definitions_and_calls(base_file, called_names(diff))
+    symbols = definitions_and_calls(base_file, called_names(diff), other_files)
     changed = function_at(base_file, line_start)
     return pack_sections(
         [

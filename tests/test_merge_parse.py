@@ -1,6 +1,7 @@
 """Dedup, JSON recovery, and the mockable LLM retry loop."""
 
-from scripts.rules.llm import build_chat_kwargs, request_rules, thinking_controls
+from scripts.llm.client import build_chat_kwargs, thinking_controls
+from scripts.proposals.extract import request_rules
 from scripts.proposals.merge import make_rule_id, merge_rules, slug_category
 from scripts.llm.parsing import extract_json, strip_thinking
 

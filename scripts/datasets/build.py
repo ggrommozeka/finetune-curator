@@ -70,9 +70,9 @@ def build_samples(
             from_gitlab_store(
                 gitlab_root,
                 signal_config or load_signal_config(),
-                review_context_lines=review_context_lines if tasks == {"review"} else None,
+                review_context_lines=review_context_lines if (not tasks or "review" in tasks) else None,
                 conventions=conventions,
-                context_tokens=max_tokens if tasks == {"review"} else 16_384,
+                context_tokens=REVIEW_MAX_TOKENS,
             )
         )
     if tasks:
@@ -103,14 +103,14 @@ def build_samples(
         "eval": held,
         "manifest": {
             "chat_template": chat_template,
-            "tool_format": "qwen3" if chat_template in {"qwen3", "qwen3.5"} else chat_template,
+            "tool_format": "qwen3" if chat_template in {"qwen3", "qwen3.5", "qwen3.8"} else chat_template,
             "thinking": thinking,
             "target": target["name"],
             "base_model": target["base_model"],
             "base_model_candidates": target["candidates"],
             "train_precision": target["precision"],
             "variant": variant,
-            "target_model": "qwen3.5-9b" if tasks == {"review"} else "qwen3.5-27b",
+            "target_model": "qwen3.5-9b" if tasks == {"review"} else "qwen3.8-27b",
             "tasks": sorted(tasks) if tasks else ["agentic", "style", "review"],
             "max_tokens": max_tokens,
             "review_context_lines": review_context_lines,

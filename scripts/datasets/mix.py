@@ -126,6 +126,15 @@ def assign_splits(samples: list[Sample], ratio: float, seed: str = "finetune") -
     return train, eval_rows
 
 
+def _model_rank(sample: Sample) -> tuple[float, str]:
+    """Higher source-model weight first, then id. ``prefer_source_models`` stores the weight."""
+    try:
+        weight = float(sample.extra.get("model_weight") or 1.0)
+    except (TypeError, ValueError):
+        weight = 1.0
+    return (-weight, sample.id)
+
+
 def mix_ratios(samples: list[Sample], ratios: dict[str, float]) -> list[Sample]:
     grouped: dict[str, list[Sample]] = defaultdict(list)
     for sample in samples:
@@ -135,14 +144,14 @@ def mix_ratios(samples: list[Sample], ratios: dict[str, float]) -> list[Sample]:
         return []
     if len(active) == 1:
         task = next(iter(active))
-        return sorted(grouped[task], key=lambda item: item.id)
+        return sorted(grouped[task], key=_model_rank)
     total = sum(active.values())
     weights = {task: weight / total for task, weight in active.items()}
     scale = min(len(grouped[task]) / weights[task] for task in active)
     picked = []
     for task, weight in weights.items():
         target = min(len(grouped[task]), max(1, int(scale * weight)))
-        ordered = sorted(grouped[task], key=lambda item: item.id)
+        ordered = sorted(grouped[task], key=_model_rank)
         picked.extend(ordered[:target])
     return picked
 
@@ -210,7 +219,10 @@ def prefer_source_models(samples: list[Sample], weights: dict[str, float]) -> li
                 weight = max(weight, float(value))
         return (-weight, sample.id)
 
-    return sorted(samples, key=rank)
+    ranked = sorted(samples, key=rank)
+    for sample in ranked:
+        sample.extra["model_weight"] = -rank(sample)[0]
+    return ranked
 
 
 def manifest_block(samples: list[Sample]) -> dict:

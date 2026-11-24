@@ -19,7 +19,7 @@ from scripts.analysis.monitor import report, rollback, snapshot_version
 from scripts.analysis.recommend import recommend_pending
 from scripts.analysis.store import PatternStore
 from scripts.proposals.export import export_approved, export_skills
-from scripts.rules.llm import chat_complete, thinking_controls
+from scripts.llm.client import chat_complete, thinking_controls
 from scripts.llm.parsing import ModelOutputError
 
 
@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     exp.add_argument("--decisions", default="data/rule_decisions.json")
     exp.add_argument("--rules-md", default="data/approved_rules.md")
     exp.add_argument("--rules-json", default="data/approved_rules.json")
-    exp.add_argument("--skills-dir", default="skills")
+    exp.add_argument("--skills-dir", default="data/skills", help="Approved skills. data/skills is gitignored.")
     exp.add_argument("--version", default=None)
 
     rep = sub.add_parser("report", help="Compare session metrics before and after each adopted version")

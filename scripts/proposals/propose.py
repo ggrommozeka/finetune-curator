@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scripts.rules.llm import request_rules
+from scripts.proposals.extract import request_rules
 from scripts.proposals.merge import merge_rules
 from scripts.llm.parsing import ModelOutputError
 from scripts.ingest.opencode_sessions import build_transcripts

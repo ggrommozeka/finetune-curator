@@ -42,27 +42,28 @@ class Sample:
     gold: str = ""
     extra: dict = field(default_factory=dict)
 
-    def as_sft(self) -> dict:
+    def _fields(self) -> dict:
+        extra = self.extra or {}
         return {
             "id": self.id,
             "task": self.task,
             "source": self.source,
-            "machine": self.machine,
+            "machine": self.machine or extra.get("machine") or "",
+            "source_model": extra.get("source_model") or "",
+            "source_provider": extra.get("source_provider") or "",
+            "reviewer": extra.get("reviewer") or "",
             "group": self.group,
             "kind": self.kind,
-            "messages": self.messages,
         }
+
+    def as_sft(self) -> dict:
+        return {**self._fields(), "messages": self.messages}
 
     def as_dpo(self) -> dict | None:
         if not self.dpo:
             return None
         return {
-            "id": self.id,
-            "task": self.task,
-            "source": self.source,
-            "machine": self.machine,
-            "group": self.group,
-            "kind": self.kind,
+            **self._fields(),
             "prompt": self.dpo["prompt"],
             "chosen": self.dpo["chosen"],
             "rejected": self.dpo["rejected"],
@@ -206,6 +207,35 @@ def style_from_pair(
     )
 
 
+def _pack_review(
+    *,
+    diff: str,
+    file_name: str,
+    line_start: int | None,
+    line_end: int | None,
+    mr: dict,
+    issues: list,
+    base_files: dict[str, str],
+    conventions: str,
+    context_tokens: int,
+    review_context_lines: int | None,
+) -> str:
+    """One packed review prompt, shared by comments, replies, and negative hunks."""
+    clipped = clip_diff_context(diff, line_start, line_end, review_context_lines) if review_context_lines else diff
+    others = [(path, text) for path, text in base_files.items() if path and path != file_name and text]
+    return review_context(
+        diff=clipped,
+        title=str(mr.get("title") or ""),
+        description=str(mr.get("description") or ""),
+        issues=issues,
+        base_file=base_files.get(file_name) or "",
+        line_start=line_start,
+        conventions=conventions,
+        max_tokens=context_tokens,
+        other_files=others,
+    )
+
+
 def _line_span(anchor: dict) -> tuple[int | None, int | None]:
     start = anchor.get("new_line_start") or anchor.get("old_line_start")
     end = anchor.get("new_line_end") or anchor.get("old_line_end") or start
@@ -285,12 +315,16 @@ def review_negative_sample(
     file_name: str,
     diff: str,
     context_lines: int | None = None,
+    context: str = "",
 ) -> Sample | None:
-    if not diff.strip():
+    if not diff.strip() and not context.strip():
         return None
-    if context_lines is not None:
+    if context_lines is not None and not context.strip():
         diff = clip_diff_context(diff, None, None, context_lines)
-    user = f"Review this diff. Name the file and lines when you comment.\n\nFile: {file_name}\n```diff\n{diff}\n```"
+    if context.strip():
+        user = "Review this change. Name the file and lines when you comment.\n\n" + context.strip()
+    else:
+        user = f"Review this diff. Name the file and lines when you comment.\n\nFile: {file_name}\n```diff\n{diff}\n```"
     messages = _with_system(
         REVIEW_SYSTEM,
         [{"role": "user", "content": user}, {"role": "assistant", "content": NO_ISSUES}],
@@ -388,7 +422,7 @@ def from_gitlab_bundle(
     machine: str = "gitlab",
     review_context_lines: int | None = None,
     conventions: str = "",
-    context_tokens: int = 16_384,
+    context_tokens: int = 8_192,
 ) -> list[Sample]:
     mr = bundle.get("mr") or {}
     project_id = mr.get("project_id")
@@ -449,18 +483,18 @@ def from_gitlab_bundle(
         diff = trace.get("diff") or trace.get("before") or ""
         line_start = anchor.get("new_line_start") or anchor.get("old_line_start")
         line_end = anchor.get("new_line_end") or anchor.get("old_line_end")
-        packed = ""
-        if diff or file_name:
-            packed = review_context(
-                diff=clip_diff_context(diff, line_start, line_end, review_context_lines) if review_context_lines else diff,
-                title=str(mr.get("title") or ""),
-                description=str(mr.get("description") or ""),
-                issues=issues,
-                base_file=base_files.get(file_name) or "",
-                line_start=line_start,
-                conventions=conventions,
-                max_tokens=context_tokens,
-            )
+        packed = _pack_review(
+            diff=diff,
+            file_name=file_name,
+            line_start=line_start,
+            line_end=line_end,
+            mr=mr,
+            issues=issues,
+            base_files=base_files,
+            conventions=conventions,
+            context_tokens=context_tokens,
+            review_context_lines=review_context_lines,
+        )
         review = review_comment_sample(
             sample_id=f"review-{project_id}-{iid}-{trace.get('note_id')}",
             group=group,
@@ -488,7 +522,7 @@ def from_gitlab_bundle(
                 reviewer=reply.get("author_username") or "",
                 line_start=(anchor.get("new_line_start") or anchor.get("old_line_start")),
                 line_end=(anchor.get("new_line_end") or anchor.get("old_line_end")),
-                context_lines=review_context_lines,
+                context=packed,
             )
             if reply_review:
                 samples.append(reply_review)
@@ -521,7 +555,18 @@ def from_gitlab_bundle(
                     machine=machine,
                     file_name=path,
                     diff=hunk.text,
-                    context_lines=review_context_lines,
+                    context=_pack_review(
+                        diff=hunk.text,
+                        file_name=path,
+                        line_start=start,
+                        line_end=end,
+                        mr=mr,
+                        issues=issues,
+                        base_files=base_files,
+                        conventions=conventions,
+                        context_tokens=context_tokens,
+                        review_context_lines=review_context_lines,
+                    ),
                 )
                 if negative:
                     samples.append(negative)
@@ -534,7 +579,7 @@ def from_gitlab_store(
     *,
     review_context_lines: int | None = None,
     conventions: str = "",
-    context_tokens: int = 16_384,
+    context_tokens: int = 8_192,
 ) -> list[Sample]:
     from pathlib import Path
 

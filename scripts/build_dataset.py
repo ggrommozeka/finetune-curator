@@ -27,13 +27,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--base-model",
         default=None,
-        help="Checkpoint id for this target. Author defaults to Qwen/Qwen3.5-27B. Review defaults to Qwen/Qwen3.5-9B. Ornith-1.0-9B is the other reviewer candidate.",
+        help="Checkpoint id for this target. Author defaults to Qwen/Qwen3.8-27B. Review defaults to Qwen/Qwen3.5-9B. Ornith-1.0-9B is the other reviewer candidate.",
     )
     parser.add_argument(
         "--chat-template",
         choices=list(CHAT_TEMPLATES),
-        default="qwen3",
-        help="Agentic and style default to Qwen3 tool-calling ChatML. Review can select another 9B family.",
+        default=None,
+        help="Author defaults to qwen3.8 (same ChatML tool calls as qwen3). Review defaults to qwen3. Pass a name to override.",
     )
     parser.add_argument(
         "--thinking",
@@ -88,35 +88,29 @@ def load_profile(path: str | None) -> dict:
     return data
 
 
-def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
-    profile = load_profile(args.profile)
+def _one_export(args, profile: dict, task: str, output_dir: Path) -> None:
     dataset = profile.get("dataset") or {}
-    args.task = args.task or dataset.get("task") or "all"
     variant = args.variant or dataset.get("variant") or "full"
-    if args.max_tokens is None and dataset.get("max_tokens"):
-        args.max_tokens = int(dataset["max_tokens"])
-    if args.base_model is None and profile.get("base_model"):
-        args.base_model = profile["base_model"]
-    if args.task == "author":
+    max_tokens = args.max_tokens
+    if max_tokens is None and dataset.get("max_tokens") and (not args.task or args.task == task):
+        max_tokens = int(dataset["max_tokens"])
+    base_model = args.base_model or profile.get("base_model")
+    if task == "author":
         tasks = {"agentic", "style"}
-    elif args.task == "all":
-        tasks = None
+    elif task == "all":
+        raise SystemExit("Author and review datasets are written separately. Use --task author or --task review.")
     else:
-        tasks = {args.task}
+        tasks = {task}
     weights = {}
     for item in args.model_weight or []:
         if "=" not in item:
             raise SystemExit(f"--model-weight must look like claude=3, got {item}")
         pattern, value = item.split("=", 1)
         weights[pattern.strip()] = float(value)
-    if args.max_tokens is None:
-        args.max_tokens = REVIEW_MAX_TOKENS if args.task == "review" else LARGE_MAX_TOKENS
+    if max_tokens is None:
+        max_tokens = REVIEW_MAX_TOKENS if task == "review" else LARGE_MAX_TOKENS
     ratios = {"agentic": args.agentic, "style": args.style, "review": args.review}
-    if tasks:
-        ratios = {name: (1.0 if name in tasks else 0.0) for name in ratios}
-    if sum(ratios.values()) <= 0:
-        raise SystemExit("At least one task ratio must be positive.")
+    ratios = {name: (1.0 if name in tasks else 0.0) for name in ratios}
     config = load_signal_config(args.config, team_leads=args.team_lead, mrr_pattern=args.mrr_pattern)
     opencode = Path(args.input) if args.input else None
     gitlab = Path(args.gitlab_store) if args.gitlab_store else None
@@ -127,7 +121,7 @@ def main(argv: list[str] | None = None) -> None:
         gitlab_root=gitlab if gitlab and (gitlab / "store.db").exists() else None,
         patterns_root=patterns if patterns and (patterns / "store.db").exists() else None,
         ratios=ratios,
-        max_tokens=args.max_tokens,
+        max_tokens=max_tokens,
         chars_per_token=args.chars_per_token,
         eval_ratio=args.eval_ratio,
         anonymize=args.anonymize,
@@ -137,16 +131,29 @@ def main(argv: list[str] | None = None) -> None:
         seed=args.seed,
         tasks=tasks,
         chat_template=args.chat_template,
-        base_model=args.base_model,
-        review_context_lines=args.review_context_lines if args.task == "review" else None,
+        base_model=base_model,
+        review_context_lines=args.review_context_lines if "review" in tasks else None,
         thinking=args.thinking,
         source_models=set(args.source_model or []) or None,
         model_weights=weights,
         conventions=_conventions(args),
         variant=variant,
     )
-    written = write_dataset(result, Path(args.output_dir))
-    print(json.dumps({"manifest": result["manifest"], "files": written}, ensure_ascii=False, indent=2))
+    written = write_dataset(result, output_dir)
+    print(json.dumps({"task": task, "manifest": result["manifest"], "files": written}, ensure_ascii=False, indent=2))
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    profile = load_profile(args.profile)
+    dataset = profile.get("dataset") or {}
+    chosen = args.task or dataset.get("task")
+    if chosen in {None, "all"}:
+        parent = Path(args.output_dir)
+        _one_export(args, profile, "author", parent / "author")
+        _one_export(args, profile, "review", parent / "review")
+        return
+    _one_export(args, profile, str(chosen), Path(args.output_dir))
 
 
 if __name__ == "__main__":

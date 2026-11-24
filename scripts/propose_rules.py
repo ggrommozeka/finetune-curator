@@ -15,7 +15,7 @@ from scripts.llm.endpoint import (
     pick_remote_model,
     resolve_endpoint,
 )
-from scripts.rules.llm import chat_complete, thinking_controls
+from scripts.llm.client import chat_complete, thinking_controls
 from scripts.llm.opencode_config import (
     discover_config_files,
     iter_configured_models,

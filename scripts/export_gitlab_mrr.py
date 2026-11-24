@@ -172,7 +172,7 @@ def _propose(records: list[dict], args) -> None:
     if not records:
         print("No examples to propose rules from.")
         return
-    from scripts.rules.llm import chat_complete, thinking_controls
+    from scripts.llm.client import chat_complete, thinking_controls
     from scripts.proposals.propose import propose_rules
     from scripts.proposals.store import upsert_proposals
 
@@ -300,7 +300,7 @@ def _polish_fn(args):
     if args.mock_response:
         raw = Path(args.mock_response).read_text(encoding="utf-8")
         return lambda _messages: raw
-    from scripts.rules.llm import chat_complete, thinking_controls
+    from scripts.llm.client import chat_complete, thinking_controls
     from scripts.propose_rules import _resolve
     import argparse
 

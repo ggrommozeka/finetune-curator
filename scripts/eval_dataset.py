@@ -17,7 +17,7 @@ from scripts.training.evaluate import (
     style_metrics,
 )
 from scripts.llm.endpoint import resolve_endpoint
-from scripts.rules.llm import chat_complete, thinking_controls
+from scripts.llm.client import chat_complete, thinking_controls
 
 
 def _complete_for(spec: dict):

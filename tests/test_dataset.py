@@ -192,6 +192,10 @@ def test_gitlab_style_review_and_held_out_groups(tmp_path: Path):
     reviewers = {sample.extra.get("reviewer") for sample in gitlab_samples if sample.kind == "review"}
     assert "rita" in reviewers
     assert "omar" in reviewers
+    omar = next(sample for sample in gitlab_samples if sample.extra.get("reviewer") == "omar")
+    assert "Parser" in omar.messages[1]["content"]
+    negative = next(sample for sample in gitlab_samples if sample.kind == "review-negative")
+    assert "Parser" in negative.messages[1]["content"]
     assert any(sample.kind == "review-negative" for sample in gitlab_samples)
     assert any(sample.kind == "polish" for sample in gitlab_samples)
     assert any(sample.dpo and sample.task == "style" for sample in gitlab_samples)
@@ -266,7 +270,7 @@ def test_length_limit_dedup_anonymize_and_manifest(tmp_path: Path):
     blob = json.dumps([sample.as_sft() for sample in hidden["train"]])
     assert "ada@company.com" not in blob
     assert "https://" not in blob
-    assert result["manifest"]["chat_template"] == "qwen3"
+    assert result["manifest"]["chat_template"] == "qwen3.8"
     assert "by_task" in result["manifest"]["train"]
     assert "by_machine" in result["manifest"]["train"]
 
@@ -328,10 +332,15 @@ def test_eval_and_cli(tmp_path: Path):
             "0.5",
         ]
     )
-    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    manifest = json.loads((out / "author" / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["train"]["by_task"]["agentic"] == 1
-    assert (out / "train.jsonl").read_text(encoding="utf-8").strip()
-    assert manifest["chat_template"] == "qwen3"
+    assert "review" not in manifest["train"]["by_task"]
+    assert (out / "author" / "train.jsonl").read_text(encoding="utf-8").strip()
+    assert manifest["chat_template"] == "qwen3.8"
+    assert manifest["base_model"] == "Qwen/Qwen3.8-27B"
+    review_manifest = json.loads((out / "review" / "manifest.json").read_text(encoding="utf-8"))
+    assert review_manifest["tasks"] == ["review"]
+    assert review_manifest["train"]["samples"] == 0
 
 
 def test_review_export_is_short_and_template_is_selectable(tmp_path: Path):
@@ -525,6 +534,8 @@ def test_hardware_profiles_match_the_two_machines():
     assert sharded["training"]["device_map"] == "balanced"
     assert sharded["training"]["cpu_offload"] is False
     assert sharded["hardware"]["nvlink"] is False
+    assert author["base_model"] == "Qwen/Qwen3.8-27B"
+    assert author["chat_template"] == "qwen3.8"
     assert author["training"]["load_in_4bit"] is False
     assert author["training"]["cpu_offload"] is False
     assert author["hardware"]["machine"] == "rented"
@@ -559,8 +570,8 @@ def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Pat
     assert "<think>" not in blob
     assert "Renamed the helper." in blob
     assert stripped["manifest"]["thinking"] == "strip"
-    assert stripped["manifest"]["target_model"] == "qwen3.5-27b"
-    assert stripped["manifest"]["base_model"] == "Qwen/Qwen3.5-27B"
+    assert stripped["manifest"]["target_model"] == "qwen3.8-27b"
+    assert stripped["manifest"]["base_model"] == "Qwen/Qwen3.8-27B"
     assert stripped["manifest"]["tool_format"] == "qwen3"
     kept = build_samples(
         opencode_path=path,
@@ -583,3 +594,50 @@ def test_qwen3_strips_thinking_and_repeats_the_task_when_splitting(tmp_path: Pat
     )
     assert len(parts) >= 2
     assert all("TASK-START" in json.dumps(part) for part in parts)
+
+
+def test_model_weight_survives_mixing_and_rows_keep_metadata():
+    from scripts.datasets.mix import mix_ratios, prefer_source_models
+    from scripts.datasets.tasks import Sample
+
+    samples = [
+        Sample("b", "agentic", "opencode", "laptop-a", "b", [{"role": "user", "content": "b"}], "trajectory", extra={"source_model": "other/x"}),
+        Sample("a", "agentic", "opencode", "laptop-a", "a", [{"role": "user", "content": "a"}], "trajectory", extra={"source_model": "claude/opus", "source_provider": "anthropic"}),
+    ]
+    mixed = mix_ratios(prefer_source_models(samples, {"claude": 3}), {"agentic": 1})
+    assert [sample.id for sample in mixed] == ["a", "b"]
+    row = mixed[0].as_sft()
+    assert row["source_model"] == "claude/opus"
+    assert row["source_provider"] == "anthropic"
+    assert row["machine"] == "laptop-a"
+    assert row["reviewer"] == ""
+
+
+def test_qwen38_template_matches_qwen3_and_symbols_cross_files():
+    from scripts.datasets.context import definitions_and_calls
+
+    messages = [{"role": "user", "content": "ping"}]
+    assert render_chat(messages, "qwen3.8") == render_chat(messages, "qwen3")
+    found = definitions_and_calls(
+        "def changed():\n    return helper()\n",
+        ["helper"],
+        [("lib.py", "def helper():\n    return 1\n")],
+    )
+    assert "lib.py" in found
+    assert "def helper" in found
+
+
+def test_skills_dir_defaults_to_gitignored_data(tmp_path: Path):
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, "-m", "scripts.mine_patterns", "export", "--help"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "data/skills" in completed.stdout
+    assert "data/skills/" in (root / ".gitignore").read_text(encoding="utf-8")

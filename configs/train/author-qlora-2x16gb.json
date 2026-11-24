@@ -1,8 +1,8 @@
 {
   "profile": "author-qlora-2x16gb",
   "target": "author",
-  "base_model": "Qwen/Qwen3.5-27B",
-  "chat_template": "qwen3",
+  "base_model": "Qwen/Qwen3.8-27B",
+  "chat_template": "qwen3.8",
   "hardware": {
     "machine": "local",
     "gpus": ["RTX 5060 Ti 16GB", "RTX 5060 Ti 16GB"],
