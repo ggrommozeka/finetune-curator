@@ -153,7 +153,7 @@ def _compile_pattern(pattern: str) -> None:
     try:
         re.compile(pattern)
     except re.error as exc:
-        raise SystemExit(f"Invalid --fix-pattern: {exc}") from exc
+        raise SystemExit(f"Invalid --mrr-pattern: {exc}") from exc
 
 
 def _selected_refs(store: GitlabStore, args) -> list[str]:

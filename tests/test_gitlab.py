@@ -746,3 +746,25 @@ def test_issue_url_keeps_its_project():
     assert ("grp/sub/proj", "5") in refs
     assert ("", "5") not in refs
     assert ("", "2") in refs
+
+
+def test_invalid_mrr_pattern_names_the_flag(tmp_path: Path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.export_gitlab_mrr",
+            "process",
+            "--store",
+            str(tmp_path / "gitlab"),
+            "--mrr-pattern",
+            "[",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "Invalid --mrr-pattern" in result.stderr
+    assert "fix-pattern" not in result.stderr
